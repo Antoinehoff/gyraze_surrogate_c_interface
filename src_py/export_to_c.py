@@ -23,6 +23,9 @@ import numpy as np
 import joblib
 import m2cgen as m2c
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.normpath(os.path.join(_HERE, ".."))
+
 
 # ── Model definition ─────────────────────────────────────────────────────────
 
@@ -46,10 +49,10 @@ class NeuralNetwork(nn.Module):
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _c_array(values, name, comment=""):
-    """Format a Python list as a static C float array initialiser."""
+    """Format a Python list as a static C double array initialiser."""
     body = ", ".join(f"{v:.8f}f" for v in values)
     s  = f"/* {comment} */\n" if comment else ""
-    s += f"static const float {name}[{len(values)}] = {{{body}}};\n"
+    s += f"static const double {name}[{len(values)}] = {{{body}}};\n"
     return s
 
 
@@ -71,10 +74,10 @@ def _dense_layer_c(i, in_dim, out_dim, activation):
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def generate_c_code(
-    nn_model: str      = "nn_model.pth",
-    svm_model: str     = "svm_model.pkl",
-    normalization: str = "normalization.npz",
-    output_dir: str    = ".",
+    nn_model: str      = os.path.join(_ROOT, "model", "nn_model.pth"),
+    svm_model: str     = os.path.join(_ROOT, "model", "svm_model.pkl"),
+    normalization: str = os.path.join(_ROOT, "model", "normalization.npz"),
+    output_dir: str    = os.path.join(_ROOT, "generated_c_code"),
     output_name: str   = "surrogate",
 ):
     """
@@ -117,9 +120,9 @@ def generate_c_code(
         weight_arrays += "\n"
 
     # ── Build NN forward-pass C code ──────────────────────────────────────────
-    buf_decls = "    float h0[3];\n"
+    buf_decls = "    double h0[3];\n"
     for i, (_, out_d) in enumerate(layer_dims):
-        buf_decls += f"    float h{i+1}[{out_d}];\n"
+        buf_decls += f"    double h{i+1}[{out_d}];\n"
 
     norm_code = "    /* input normalisation */\n"
     for k in range(3):
@@ -150,7 +153,7 @@ def generate_c_code(
         f" *\n"
         f" * Public API:\n"
         f" *   int   gyraze_converged(double alpha, double gamma, double phi);\n"
-        f" *   void  gyraze_predict  (float alpha, float gamma, float phi, float out[{out_dim}]);\n"
+        f" *   void  gyraze_predict  (double alpha, double gamma, double phi, double out[{out_dim}]);\n"
         f" */\n"
         f"#include <math.h>\n"
         f"#include <stddef.h>\n"
@@ -163,9 +166,9 @@ def generate_c_code(
         "/* ── Network weights & biases ───────────────────────────────────────────── */\n" +
         weight_arrays +
         f"/* ── Neural-network forward pass ────────────────────────────────────────── */\n"
-        f"void gyraze_predict(float alpha, float gamma, float phi, float out[{out_dim}])\n"
+        f"void gyraze_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
         f"{{\n"
-        f"    float x[3] = {{alpha, gamma, phi}};\n"
+        f"    double x[3] = {{alpha, gamma, phi}};\n"
         f"{buf_decls}\n"
         f"{norm_code}\n"
         f"{layer_code}\n"
@@ -190,7 +193,7 @@ def generate_c_code(
         f"/* Returns 1 if GYRAZE is predicted to converge, 0 otherwise. */\n"
         f"int  gyraze_converged(double alpha, double gamma, double phi);\n\n"
         f"/* Runs the NN regression; writes {out_dim} predicted values into out[]. */\n"
-        f"void gyraze_predict(float alpha, float gamma, float phi, float out[{out_dim}]);\n\n"
+        f"void gyraze_predict(double alpha, double gamma, double phi, double out[{out_dim}]);\n\n"
         f"#endif /* {guard} */\n"
     )
 
@@ -201,12 +204,12 @@ def generate_c_code(
         f'int main(void)\n'
         f'{{\n'
         f'    double alpha = 4.0, gamma = 1.0, phi = 2.5;\n'
-        f'    float out[{out_dim}];\n\n'
+        f'    double out[{out_dim}];\n\n'
         f'    if (!gyraze_converged(alpha, gamma, phi)) {{\n'
         f'        printf("Did not converge\\n");\n'
         f'        return 1;\n'
         f'    }}\n\n'
-        f'    gyraze_predict((float)alpha, (float)gamma, (float)phi, out);\n\n'
+        f'    gyraze_predict((double)alpha, (double)gamma, (double)phi, out);\n\n'
         f'    for (int i = 0; i < {out_dim}; i++)\n'
         f'        printf("out[%2d] = %.6f\\n", i, out[i]);\n\n'
         f'    return 0;\n'

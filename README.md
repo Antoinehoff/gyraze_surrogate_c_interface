@@ -17,13 +17,16 @@ The neural network surrogate model is developed and maintained by **Camden Warme
 
 | File | Description |
 |------|-------------|
-| `gyraze_surrogate.py` | Python surrogate model (NN + SVM evaluation) |
-| `export_to_c.py` | Exports the surrogate to self-contained C code |
-| `nn_model.pth` | Pretrained NN weights (PyTorch) |
-| `svm_model.pkl` | Pretrained SVM classifier (scikit-learn 1.6.1) |
-| `normalization.npz` | Input/output normalisation parameters |
-| `test_surrogate.ipynb` | Jupyter notebook: evaluation + C export + verification |
-| `retrain_models.ipynb` | Jupyter notebook: model retraining |
+| `src_py/gyraze_surrogate.py` | Python surrogate model (NN + SVM evaluation) |
+| `src_py/surrogate_proj.py` | Extended surrogate with nearest-boundary search |
+| `src_py/export_to_c.py` | Exports the surrogate to self-contained C code |
+| `model/nn_model.pth` | Pretrained NN weights (PyTorch) |
+| `model/svm_model.pkl` | Pretrained SVM classifier (scikit-learn 1.6.1) |
+| `model/normalization.npz` | Input/output normalisation parameters |
+| `notebook/test_surrogate.ipynb` | Jupyter notebook: evaluation + C export + verification |
+| `notebook/retrain_models.ipynb` | Jupyter notebook: model retraining |
+| `generated_c_code/` | Auto-generated C source (surrogate.c/h, Makefile) |
+| `data/` | Data files (training data, etc.) |
 | `requirements.txt` | Python dependencies |
 
 ---
@@ -37,7 +40,10 @@ pip install -r requirements.txt
 
 **Evaluate the surrogate:**
 ```python
-from gyraze_surrogate import surrogate_model
+import sys
+sys.path.insert(0, '/path/to/gkeyll_sheath_ai')   # project root
+
+from src_py import surrogate_model
 
 surrogate_model(4, 0.5, 2.5)
 # predicts v_par_cut(mu) for alpha=4, gamma=0.5, phi_wall=2.5
@@ -51,13 +57,16 @@ surrogate_model(4, 0.5, 2.5)
 The surrogate can be exported to pure C with no runtime dependencies beyond `libm`:
 
 ```python
-from export_to_c import generate_c_code
+import sys
+sys.path.insert(0, '/path/to/gkeyll_sheath_ai')   # project root
+
+from src_py import generate_c_code
 
 generate_c_code(
-    nn_model      = "nn_model.pth",
-    svm_model     = "svm_model.pkl",
-    normalization = "normalization.npz",
-    output_dir    = "generated_c_code",   # optional, default "."
+    nn_model      = "model/nn_model.pth",
+    svm_model     = "model/svm_model.pkl",
+    normalization = "model/normalization.npz",
+    output_dir    = "generated_c_code",   # optional, default "generated_c_code"
     output_name   = "surrogate",           # optional, default "surrogate"
 )
 ```

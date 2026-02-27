@@ -11,11 +11,15 @@ Original file is located at
 #  LOAD PRETRAINED NN + SVM MODELS FOR GYRAZE PREDICTION
 # ============================================================
 
+import os
 import torch
 from torch import nn
 import numpy as np
 import joblib
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+_MODEL_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "model"))
 
 class NeuralNetwork(nn.Module):
     def __init__(self, input_dim=3, output_dim=20, width=75, depth=3, activation='silu'):
@@ -38,14 +42,14 @@ class NeuralNetwork(nn.Module):
         return self.net(x)
 
 #Load pretrained models
-clf = joblib.load("svm_model.pkl")
+clf = joblib.load(os.path.join(_MODEL_DIR, "svm_model.pkl"))
 
 model = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-model.load_state_dict(torch.load("nn_model.pth", map_location='cpu'))
+model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model.pth"), map_location='cpu'))
 model.eval()
 
 # Load normalization parameters
-norms = np.load("normalization.npz")
+norms = np.load(os.path.join(_MODEL_DIR, "normalization.npz"))
 X_mu, X_sigma = torch.tensor(norms["X_mu"]), torch.tensor(norms["X_sigma"])
 Y_mu, Y_sigma = torch.tensor(norms["Y_mu"]), torch.tensor(norms["Y_sigma"])
 
@@ -59,11 +63,23 @@ muvec = np.array([
     3.920000, 4.500000, 5.120000, 5.780000, 6.480000, 7.220000
 ])
 
+def find_nearest(clf, x0, lam=1e-3, bounds=None, tol=1e-6, maxiter=500):
+    x0 = np.asarray(x0, dtype=float)
+
+    def obj(x):
+        val = clf.decision_function(np.atleast_2d(x))[0]
+        return float(val*val + lam * np.sum((x - x0)**2))
+
+    res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds, tol=tol, options={"maxiter": maxiter})
+    if not res.success:
+        return None, res
+    return res.x, res
+
 # ============================================================
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = False):
+def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, show_fig: bool = False):
     """Evaluate SVM convergence and NN prediction for given (α, γ, φ)."""
     params = [alpha, gamma, phi]
 
@@ -71,7 +87,13 @@ def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = Fal
     y_pred_class = clf.predict([params])
     if y_pred_class == 0:
         print(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
-        return None
+        print(f"Performing quasi-Newton method on inputs to find closest convergent parameters")
+        x_bd, res = find_nearest(clf, params)
+        if x_bd is None:
+            print("Boundary search failed:", res.message)
+            return None
+        print("Found boundary point:", x_bd, "Residual vector:", params-x_bd)
+        params = x_bd
     else:
         print(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
 
@@ -80,16 +102,18 @@ def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = Fal
         x_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
         Y_pred = model(normX(x_tensor))
         Y_pred_denorm = denormy(Y_pred).cpu().numpy().flatten()
-
+        
+    interp = np.interp(mu, muvec, Y_pred_denorm)
+    
     # --- Plot ---
     if show_fig:
-        plt.figure(figsize=(3, 4))
+        plt.figure(figsize=(3.5,5))
         plt.plot(Y_pred_denorm, muvec, '.-')
         plt.title(r"Predicted profile"+ "\n" + r"($\alpha={alpha}$, $\gamma={gamma}$, $\phi={phi}$)".format(alpha=alpha, gamma=gamma, phi=phi))
         plt.xlabel(r"$v_{\parallel}/v_{th}$")
         plt.ylabel(r"$\mu B/T$")
-        plt.xlim(0, 2)
+        plt.xlim(0, 1.1*max(Y_pred_denorm))
         plt.grid(True)
         plt.show()
-
-    return Y_pred_denorm
+        
+    return interp
