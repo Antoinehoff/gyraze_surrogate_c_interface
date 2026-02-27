@@ -79,23 +79,24 @@ def find_nearest(clf, x0, lam=1e-3, bounds=None, tol=1e-6, maxiter=500):
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, show_fig: bool = False):
+def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, show_fig: bool = False,
+                    msg: list = []):
     """Evaluate SVM convergence and NN prediction for given (α, γ, φ)."""
     params = [alpha, gamma, phi]
 
     # --- SVM classification ---
     y_pred_class = clf.predict([params])
     if y_pred_class == 0:
-        print(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
-        print(f"Performing quasi-Newton method on inputs to find closest convergent parameters")
+        msg.append(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
+        msg.append(f"Performing quasi-Newton method on inputs to find closest convergent parameters")
         x_bd, res = find_nearest(clf, params)
         if x_bd is None:
-            print("Boundary search failed:", res.message)
+            msg.append("Boundary search failed: " + res.message)
             return None
-        print("Found boundary point:", x_bd, "Residual vector:", params-x_bd)
+        msg.append("Found boundary point: " + str(x_bd) + " Residual vector: " + str(params-x_bd))
         params = x_bd
     else:
-        print(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
+        msg.append(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
 
     # --- NN regression prediction ---
     with torch.no_grad():

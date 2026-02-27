@@ -66,17 +66,18 @@ muvec = np.array([
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = False):
+def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = False,
+                    msg: list = []):
     """Evaluate SVM convergence and NN prediction for given (α, γ, φ)."""
     params = [alpha, gamma, phi]
 
     # --- SVM classification ---
     y_pred_class = clf.predict([params])
     if y_pred_class == 0:
-        print(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
+        msg.append(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
         return None
     else:
-        print(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
+        msg.append(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
 
     # --- NN regression prediction ---
     with torch.no_grad():

@@ -89,11 +89,20 @@ cd generated_c_code && make
 ### C API
 
 ```c
+#define GYRAZE_N_MU 20   /* number of mu-grid points */
+
 // Returns 1 if GYRAZE is predicted to converge, 0 otherwise.
 int gyraze_converged(double alpha, double gamma, double phi);
 
-// Runs the NN and writes 20 predicted v_par_cut values into out[].
-void gyraze_predict(float alpha, float gamma, float phi, float out[20]);
+// Runs the NN; writes GYRAZE_N_MU predicted v_par_cut values into out[].
+void gyraze_predict(double alpha, double gamma, double phi, double out[GYRAZE_N_MU]);
+
+// Returns a read-only pointer to the GYRAZE_N_MU-element mu-grid.
+const double *gyraze_grid(void);
+
+// Linear interpolation of vcut[GYRAZE_N_MU] (on the fixed mu-grid) onto
+// mu_new[n]; results written into out[n]. Clamps at grid boundaries.
+void gyraze_interp(const double *vcut, const double *mu_new, int n, double *out);
 ```
 
 ---
