@@ -183,7 +183,7 @@ def generate_c_code(
                 f"#endif\n\n"
                 f"static const double SRGRZ_ELEMENTARY_CHARGE = 1.602176634e-19;  /* Elementary charge (C) */\n"
                 f"static const double SRGRZ_ELECTRON_MASS = 9.10938356e-31; /* Electron mass (kg) */\n"
-                f"static const double SRGRZ_EPSILON0        = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
+                f"static const double SRGRZ_EPSILON0 = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
             )
             header_tail = f"#endif /* {output_name.upper()}_H */\n"
             extern_c_beg = ""
@@ -239,11 +239,11 @@ def generate_c_code(
             f"    return out;\n"
             f"}}\n\n"
             
-            f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double *out)\n"
+            f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out)\n"
             f"{{\n"
             f"    int ng = SRGRZ_N_MU;\n"
             f"    for (int i = 0; i < n; i++) {{\n"
-            f"        double mu = mu_new[i];\n"
+            f"        double mu = mu_new[i]/mu_ref;\n"
             f"        if (mu <= MU_GRID[0])          {{ out[i] = vcut[0];          continue; }}\n"
             f"        if (mu >= MU_GRID[ng - 1])     {{ out[i] = vcut[ng - 1];     continue; }}\n"
             f"        /* binary search for the bracketing interval */\n"
@@ -257,24 +257,21 @@ def generate_c_code(
             f"    }}\n"
             f"}}\n\n"
             
-            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out)\n"
+            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out)\n"
             f"{{\n"
             f"    double vcut[SRGRZ_N_MU];\n"
             f"    {func_prefix}_predict(alpha, gamma, phi, vcut);\n"
-            f"    {func_prefix}_interp(vcut, mu_new, n, out);\n"
+            f"    {func_prefix}_interp(vcut, mu_new, n, mu_ref, out);\n"
             f"}}\n\n"
             
             f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
             f"    double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
-            f"    double munorm[n];\n"
-            f"    for (int i = 0; i < n; i++) {{\n"
-            f"        munorm[i] = mu_new[i] * bmag / temperature;\n"
-            f"    }}\n"
+            f"    double muref = temperature / bmag;\n"
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
             f"    double alpha = impact_angle * 180/M_PI;\n"
-            f"    {func_prefix}_eval(munorm, n, alpha, gamma, phinorm, out);\n"
+            f"    {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
             f"}}\n"
         
             f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
@@ -349,21 +346,23 @@ def generate_c_code(
             f" * @param vcut:    input array of size SRGRZ_N_MU containing values at the fixed mu-grid\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
+            f" * @param mu_ref:  reference mu value for normalisation (e.g. temperature / Bmag)\n"
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double *out);\n\n"
+            f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out);\n\n"
             
             f"/**\n"
             f" * Returns the prediction of a custom mu grid of size n\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
+            f" * @param mu_ref:  reference mu value for normalisation (e.g. temperature / Bmag)\n"
             f" * @param alpha:   impact angle in degrees\n"
             f" * @param gamma:   normalised plasma density parameter\n"
             f" * @param phi:     normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out);\n\n"
+            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out);\n\n"
             
             f"/**\n"
             f" * Converts from physical parameters and evaluates on a custom mu grid.\n"
@@ -439,6 +438,7 @@ def generate_c_code(
         f'    double alpha = 4.0, gamma = 1.0, phi = 2.5, mu = 1.0;\n'
         f'    double phi_wall = 0.0, density = 1e19, temperature = 100.0;\n'
         f'    double q2Dm = -2*SRGRZ_ELEMENTARY_CHARGE/SRGRZ_ELECTRON_MASS, bmag = 1.0, impact_angle = 0.0;\n'
+        f'    double mu_ref = temperature / bmag;\n'
         f'    double out[{out_dim}];\n\n'
         f'    if (argc < 2) {{\n'
         f'        fprintf(stderr, "Usage: %s {{predict|eval|physical|physical_vcut_fact}} [args...]\\n", argv[0]);\n'
@@ -470,7 +470,7 @@ def generate_c_code(
         f'        if (argc > 3) alpha = atof(argv[3]);\n'
         f'        if (argc > 4) gamma = atof(argv[4]);\n'
         f'        if (argc > 5) phi = atof(argv[5]);\n\n'
-        f'        srgrz_eval(&mu, 1, alpha, gamma, phi, &result);\n\n'
+        f'        srgrz_eval(&mu, 1, 1.0, alpha, gamma, phi, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
         f'    }}\n'
         f'    else if (strcmp(argv[1], "physical") == 0) {{\n'
@@ -500,9 +500,7 @@ def generate_c_code(
         f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
         f'        srgrz_eval_physical_vcut_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
-        f'    }}\n'
-        f''
-        f'    else {{\n'
+        f'    }} else {{\n'
         f'        fprintf(stderr, "Unknown mode: %s\\n", argv[1]);\n'
         f'        fprintf(stderr, "Use \'predict\', \'eval\', or \'physical\'\\n");\n'
         f'        return 1;\n'
