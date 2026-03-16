@@ -148,6 +148,11 @@ def generate_c_code(
         f"    for (int _j = 0; _j < {out_dim}; _j++)\n"
         f"        out[_j] = h{n_layers}[_j] * Y_sigma[_j] + Y_mu[_j];\n"
     )
+    filter_negative_code = (
+        "    /* enforce non-negativity of the output (physically vcut cannot be negative) */\n"
+        f"    for (int _j = 0; _j < {out_dim}; _j++)\n"
+        f"        if (out[_j] < 0.0f) out[_j] = 0.0f;\n"
+    )
 
     # ── SVM via m2cgen ────────────────────────────────────────────────────────
     svm_c_code = m2c.export_to_c(clf)
@@ -178,6 +183,7 @@ def generate_c_code(
         f"{norm_code}\n"
         f"{layer_code}\n"
         f"{denorm_code}"
+        f"{filter_negative_code}"
         f"}}\n\n"
         
         + svm_c_code + "\n"
@@ -232,18 +238,18 @@ def generate_c_code(
         f"void srgrz_eval_physical(\n"
         f"    const double *mu_new,  int n,\n"
         f"    double phi,            double phi_wall,\n"
-        f"    double dens_e,         double temp_e,\n"
-        f"    double m_e,            double bmag,\n"
-        f"    double bimpact_angle,\n"
+        f"    double density,         double temperature,\n"
+        f"    double q2Dm,            double bmag,\n"
+        f"    double impact_angle,\n"
         f"    double *out)\n"
         f"{{\n"
         f"    double *munorm = (double*)malloc(n * sizeof(double));\n"
         f"    for (int i = 0; i < n; i++) {{\n"
-        f"        munorm[i] = mu_new[i] * bmag / temp_e;\n"
+        f"        munorm[i] = mu_new[i] * bmag / temperature;\n"
         f"    }}\n"
-        f"    double gamma   = (1.0 / bmag) * sqrt(m_e * dens_e / SRGRZ_EPS0);\n"
-        f"    double phinorm = SRGRZ_ELEM_CHARGE * (phi - phi_wall) / temp_e;\n"
-        f"    double alpha = bimpact_angle * 180.0 / M_PI;\n"
+        f"    double gamma   = (1.0 / bmag) * sqrt(SRGRZ_ELECTRON_MASS * density / SRGRZ_EPS0);\n"
+        f"    double phinorm = SRGRZ_ELEM_CHARGE * (phi - phi_wall) / temperature;\n"
+        f"    double alpha = impact_angle * 180.0 / M_PI;\n"
         f"    srgrz_eval(munorm, n, alpha, gamma, phinorm, out);\n"
         f"    free(munorm);\n"
         f"}}\n"
@@ -251,15 +257,17 @@ def generate_c_code(
         f"void srgrz_eval_physical_vcut_fact(\n"
         f"    const double *mu_new,  int n,\n"
         f"    double phi,            double phi_wall,\n"
-        f"    double dens_e,         double temp_e,\n"
-        f"    double m_e,            double bmag,\n"
-        f"    double bimpact_angle,\n"
+        f"    double density,         double temperature,\n"
+        f"    double q2Dm,            double bmag,\n"
+        f"    double impact_angle,\n"
         f"    double *out)\n"
         f"{{\n"
-        f"    double vcut_const = sqrt(SRGRZ_ELEM_CHARGE * (phi - phi_wall) /temp_e);\n"
-        f"    srgrz_eval_physical(mu_new, n, phi, phi_wall, dens_e, temp_e, m_e, bmag, bimpact_angle, out);\n"
+        f"    double vcut_const = sqrt(-q2Dm * (phi - phi_wall));\n"
+        f"    double vte = sqrt(temperature / SRGRZ_ELECTRON_MASS);\n"
+        f"    // double vcut_const = sqrt(SRGRZ_ELEM_CHARGE * (phi - phi_wall) / temperature);\n"
+        f"    srgrz_eval_physical(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
         f"    for (int i = 0; i < n; i++) {{\n"
-        f"        out[i] = out[i]/vcut_const;\n"
+        f"        out[i] = pow(out[i] * vte /vcut_const, 2);\n"
         f"    }}\n"
         f"}}\n"
     )
@@ -278,6 +286,7 @@ def generate_c_code(
         f"#define M_PI 3.14159265358979323846\n"
         f"#endif\n\n"
         f"static const double SRGRZ_ELEM_CHARGE = 1.602176634e-19;  /* Elementary charge (C) */\n"
+        f"static const double SRGRZ_ELECTRON_MASS = 9.10938356e-31; /* Electron mass (kg) */\n"
         f"static const double SRGRZ_EPS0        = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
         f"/* Number of points in the fixed mu-grid. */\n"
         f"#define SRGRZ_N_MU {n_mu}\n\n"
@@ -294,17 +303,17 @@ def generate_c_code(
         f"void srgrz_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out);\n\n"
         f"/* Converts from physical parameters and evaluates on a custom mu grid.\n"
         f" * Conversion formulas:\n"
-        f" *   gamma   = (1/Bmag) * sqrt(m_e * dens_e / eps0)\n"
-        f" *   phinorm = e * phi / temp_e\n"
+        f" *   gamma   = (1/Bmag) * sqrt(m_e * density / eps0)\n"
+        f" *   phinorm = e * phi / temperature\n"
         f" */\n"
         f"void srgrz_eval_physical(\n"
         f"    const double *mu_new, int n,\n"
-        f"    double phi, double phi_wall, double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle,\n"
+        f"    double phi, double phi_wall, double density, double temperature, double q2Dm, double bmag, double impact_angle,\n"
         f"    double *out);\n\n"
         f"/* Same as srgrz_eval_physical, but normalises output by sqrt(e * (phi - phi_wall) / T_e) */\n"
         f"void srgrz_eval_physical_vcut_fact(\n"
         f"    const double *mu_new, int n,\n"
-        f"    double phi, double phi_wall, double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle,\n"
+        f"    double phi, double phi_wall, double density, double temperature, double q2Dm, double bmag, double impact_angle,\n"
         f"    double *out);\n\n"
         f"#endif /* {guard} */\n"
     )
@@ -318,8 +327,8 @@ def generate_c_code(
         f'int main(int argc, char *argv[])\n'
         f'{{\n'
         f'    double alpha = 4.0, gamma = 1.0, phi = 2.5, mu = 1.0;\n'
-        f'    double phi_wall = 0.0, dens_e = 1e19, temp_e = 100.0;\n'
-        f'    double m_e = 9.109e-31, bmag = 1.0, bimpact_angle = 0.0;\n'
+        f'    double phi_wall = 0.0, density = 1e19, temperature = 100.0;\n'
+        f'    double q2Dm = -2*SRGRZ_ELEM_CHARGE/SRGRZ_ELECTRON_MASS, bmag = 1.0, impact_angle = 0.0;\n'
         f'    double out[{out_dim}];\n\n'
         f'    if (argc < 2) {{\n'
         f'        fprintf(stderr, "Usage: %s {{predict|eval|physical|physical_vcut_fact}} [args...]\\n", argv[0]);\n'
@@ -329,9 +338,9 @@ def generate_c_code(
         f'        fprintf(stderr, "\\n  eval mu [alpha [gamma [phi]]]:\\n");\n'
         f'        fprintf(stderr, "    Evaluate surrogate at single mu point with (alpha, gamma, phi)\\n");\n'
         f'        fprintf(stderr, "    mu: scalar value (not a grid)\\n");\n'
-        f'        fprintf(stderr, "\\n  physical mu [phi [phi_wall [dens_e [temp_e [m_e [bmag [bimpact_angle]]]]]]]:\\n");\n'
+        f'        fprintf(stderr, "\\n  physical mu [phi [phi_wall [density [temperature [q2Dm [bmag [impact_angle]]]]]]]:\\n");\n'
         f'        fprintf(stderr, "    Evaluate at single mu using physical parameters\\n");\n'
-        f'        fprintf(stderr, "\\n  physical_vcut_fact mu [phi [phi_wall [dens_e [temp_e [m_e [bmag [bimpact_angle]]]]]]]:\\n");\n'
+        f'        fprintf(stderr, "\\n  physical_vcut_fact mu [phi [phi_wall [density [temperature [q2Dm [bmag [impact_angle]]]]]]]:\\n");\n'
         f'        fprintf(stderr, "    Evaluate at single mu using physical parameters and normalise by sqrt(e * (phi - phi_wall) / T_e)\\n");\n'
         f'        return 1;\n'
         f'    }}\n\n'
@@ -360,12 +369,12 @@ def generate_c_code(
         f'        if (argc > 2) mu = atof(argv[2]);\n'
         f'        if (argc > 3) phi = atof(argv[3]);\n'
         f'        if (argc > 4) phi_wall = atof(argv[4]);\n'
-        f'        if (argc > 5) dens_e = atof(argv[5]);\n'
-        f'        if (argc > 6) temp_e = atof(argv[6]);\n'
-        f'        if (argc > 7) m_e = atof(argv[7]);\n'
+        f'        if (argc > 5) density = atof(argv[5]);\n'
+        f'        if (argc > 6) temperature = atof(argv[6]);\n'
+        f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
         f'        if (argc > 8) bmag = atof(argv[8]);\n'
-        f'        if (argc > 9) bimpact_angle = atof(argv[9]);\n\n'
-        f'        srgrz_eval_physical(&mu, 1, phi, phi_wall, dens_e, temp_e, m_e, bmag, bimpact_angle, &result);\n\n'
+        f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
+        f'        srgrz_eval_physical(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
         f'    }}\n'
         f'    else if (strcmp(argv[1], "physical_vcut_fact") == 0) {{\n'
@@ -374,12 +383,12 @@ def generate_c_code(
         f'        if (argc > 2) mu = atof(argv[2]);\n'
         f'        if (argc > 3) phi = atof(argv[3]);\n'
         f'        if (argc > 4) phi_wall = atof(argv[4]);\n'
-        f'        if (argc > 5) dens_e = atof(argv[5]);\n'
-        f'        if (argc > 6) temp_e = atof(argv[6]);\n'
-        f'        if (argc > 7) m_e = atof(argv[7]);\n'
+        f'        if (argc > 5) density = atof(argv[5]);\n'
+        f'        if (argc > 6) temperature = atof(argv[6]);\n'
+        f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
         f'        if (argc > 8) bmag = atof(argv[8]);\n'
-        f'        if (argc > 9) bimpact_angle = atof(argv[9]);\n\n'
-        f'        srgrz_eval_physical_vcut_fact(&mu, 1, phi, phi_wall, dens_e, temp_e, m_e, bmag, bimpact_angle, &result);\n\n'
+        f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
+        f'        srgrz_eval_physical_vcut_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
         f'    }}\n'
         f''
@@ -472,38 +481,38 @@ def generate_c_code(
         f"/**\n"
         f" * Converts from physical parameters and evaluates on a custom mu grid.\n"
         f" * Conversion formulas:\n"
-        f" *   munorm  = mu*Bmag / temp_e\n"
-        f" *   gamma   = (1/Bmag) * sqrt(m_e * dens_e / eps0)\n"
-        f" *   phinorm = e * phi / temp_e\n"
+        f" *   munorm  = mu*Bmag / temperature\n"
+        f" *   gamma   = (1/Bmag) * sqrt(m_e * density / eps0)\n"
+        f" *   phinorm = e * phi / temperature\n"
         f" *\n"
         f" * @param mu_new:  input array of size n containing the new mu points\n"
         f" * @param n:       number of points in mu_new and out\n"
         f" * @param phi:     sheath potential (V)\n"
         f" * @param phi_wall: wall potential (V)\n"
-        f" * @param dens_e:  electron density (m^-3)\n"
-        f" * @param temp_e:  electron temperature (eV)\n"
-        f" * @param m_e:     electron mass (kg)\n"
+        f" * @param density:  electron density (m^-3)\n"
+        f" * @param temperature:  electron temperature (eV)\n"
+        f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
         f" * @param bmag:    magnetic field strength (T)\n"
-        f" * @param bimpact_angle: magnetic impact angle (radians)\n"
+        f" * @param impact_angle: magnetic impact angle (radians)\n"
         f" */\n"
         f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical(const double *mu_new, int n, double phi, double phi_wall,\n"
-        f"    double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle, double *out);\n\n"
+        f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
         
         f"/**\n"
-        f" * Same as srgrz_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / m_e)\n"
+        f" * Same as srgrz_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
         f" *\n"
         f" * @param mu_new:  input array of size n containing the new mu points\n"
         f" * @param n:       number of points in mu_new and out\n"
         f" * @param phi:     sheath potential (V)\n"
         f" * @param phi_wall: wall potential (V)\n"
-        f" * @param dens_e:  electron density (m^-3)\n"
-        f" * @param temp_e:  electron temperature (eV)\n"
-        f" * @param m_e:     electron mass (kg)\n"
+        f" * @param density:  electron density (m^-3)\n"
+        f" * @param temperature:  electron temperature (eV)\n"
+        f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
         f" * @param bmag:    magnetic field strength (T)\n"
-        f" * @param bimpact_angle: magnetic impact angle (radians)\n"
+        f" * @param impact_angle: magnetic impact angle (radians)\n"
         f" */\n"
         f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
-        f"    double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle, double *out);\n\n"
+        f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
         
         f"/**\n"
         f" * Same as srgrz_eval_physical_vcut_fact, but normalises return 0 if gyraze is not converging.\n"
@@ -512,14 +521,15 @@ def generate_c_code(
         f" * @param n:       number of points in mu_new and out\n"
         f" * @param phi:     sheath potential (V)\n"
         f" * @param phi_wall: wall potential (V)\n"
-        f" * @param dens_e:  electron density (m^-3)\n"
-        f" * @param temp_e:  electron temperature (eV)\n"
-        f" * @param m_e:     electron mass (kg)\n"
+        f" * @param density:  electron density (m^-3)\n"
+        f" * @param temperature:  electron temperature (eV)\n"
+        f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
         f" * @param bmag:    magnetic field strength (T)\n"
-        f" * @param bimpact_angle: magnetic impact angle (radians)\n"
+        f" * @param impact_angle: magnetic impact angle (radians)\n"
         f" */\n"
         f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact_converged(const double *mu_new, int n, double phi, double phi_wall,\n"
-        f"    double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle, double *out);\n\n"
+        f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
+        f"EXTERN_C_END\n\n"
     )
 
     gk_c_source = (
@@ -545,6 +555,7 @@ def generate_c_code(
         f"{norm_code}\n"
         f"{layer_code}\n"
         f"{denorm_code}"
+        f"{filter_negative_code}"
         f"}}\n\n"
         + svm_c_code + "\n"
         
@@ -587,38 +598,40 @@ def generate_c_code(
         f"    bc_sheath_gyrokinetic_srgrz_interp(vcut, mu_new, n, out);\n"
         f"}}\n\n"
         
-        "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double dens_e,\n"
-        "    double temp_e, double m_e, double bmag, double bimpact_angle, double *out)\n"
+        "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
+        "    double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
         "{\n"
         "    double munorm[n];\n"
         "    for (int i = 0; i < n; i++) {\n"
-        "        munorm[i] = mu_new[i] * bmag / temp_e;\n"
+        "        munorm[i] = mu_new[i] * bmag / temperature;\n"
         "    }\n"
-        "    double gamma   = (1.0 / bmag) * sqrt(m_e * dens_e / GKYL_EPSILON0);\n"
-        "    double phinorm = (GKYL_ELEMENTARY_CHARGE * phi) / temp_e;\n"
-        "    double alpha = bimpact_angle * 180/M_PI;\n"
+        "    double gamma   = (1.0 / bmag) * sqrt(GKYL_ELECTRON_MASS * density / GKYL_EPSILON0);\n"
+        "    double phinorm = (GKYL_ELEMENTARY_CHARGE * phi) / temperature;\n"
+        "    double alpha = impact_angle * 180/M_PI;\n"
         "    bc_sheath_gyrokinetic_srgrz_eval(munorm, n, alpha, gamma, phinorm, out);\n"
         "}\n"
     
         "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
-        "    double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle, double *out)\n"
+        "    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
         "{\n"
-        "    double vcut_const = sqrt(GKYL_ELEMENTARY_CHARGE * (phi - phi_wall) /temp_e);\n"
-        "    bc_sheath_gyrokinetic_srgrz_eval_physical(mu_new, n, phi, phi_wall, dens_e, temp_e, m_e, bmag, bimpact_angle, out);\n"
+        "    // double vcut_const = sqrt(GKYL_ELEMENTARY_CHARGE * (phi - phi_wall) /temperature);\n"
+        "    double vcut_const = sqrt(-q2Dm * (phi - phi_wall));\n"
+        "    double vte = sqrt(temperature / GKYL_ELECTRON_MASS);\n"
+        "    bc_sheath_gyrokinetic_srgrz_eval_physical(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
         "    for (int i = 0; i < n; i++) {\n"
-        "        out[i] = out[i]/vcut_const;\n"
+        "        out[i] = pow(out[i] * vte / vcut_const, 2);\n"
         "    }\n"
         "}\n"
         
         "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact_converged(const double *mu_new,  int n, double phi, double phi_wall,\n"
-        "    double dens_e, double temp_e, double m_e, double bmag, double bimpact_angle, double *out)\n"
+        "    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
         "{\n"
-        "    double gamma   = (1.0 / bmag) * sqrt(m_e * dens_e / GKYL_EPSILON0);\n"
-        "    double phinorm = (GKYL_ELEMENTARY_CHARGE * phi) / temp_e;\n"
-        "    double alpha = bimpact_angle * 180/M_PI;\n"
+        "    double gamma   = (1.0 / bmag) * sqrt(GKYL_ELECTRON_MASS * density / GKYL_EPSILON0);\n"
+        "    double phinorm = (GKYL_ELEMENTARY_CHARGE * phi) / temperature;\n"
+        "    double alpha = impact_angle * 180/M_PI;\n"
         "    int converged = bc_sheath_gyrokinetic_srgrz_converged(alpha, gamma, phinorm);\n"
         "    if (converged) {\n"
-        "        bc_sheath_gyrokinetic_srgrz_eval_physical(mu_new, n, phi, phi_wall, dens_e, temp_e, m_e, bmag, bimpact_angle, out);\n"
+        "        bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
         "    } else {\n"
         "        for (int i = 0; i < n; i++) {\n"
         "            out[i] = 0.0;\n"
