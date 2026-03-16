@@ -25,6 +25,7 @@ import m2cgen as m2c
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.normpath(os.path.join(_HERE, ".."))
+REPO_INFO = f"{os.path.basename(_ROOT)} @ {os.popen('git -C ' + _ROOT + ' rev-parse --short HEAD').read().strip()}"
 
 
 # ── Model definition ─────────────────────────────────────────────────────────
@@ -101,7 +102,8 @@ def generate_c_code(
     except ImportError:
         from gyraze_surrogate import muvec as _muvec
     mu_grid = _muvec.tolist()
-
+    n_mu = len(mu_grid)
+    
     # ── Load models ───────────────────────────────────────────────────────────
     clf = joblib.load(svm_model)
 
@@ -160,175 +162,283 @@ def generate_c_code(
     # remove redundent "#include <math.h>" from svm_c_code since it's already included in the header
     svm_c_code = svm_c_code.replace("#include <math.h>\n", "")
 
-    os.makedirs(output_dir, exist_ok=True)
-    header_name = output_name + ".h"
+    # -- Generate both a test version and a Gkeyll-compatible version of the C code --        
+    for code_gen in ['test','gkyl']:
+        if code_gen == 'test':
+            c_fname = f"{output_name}.c"
+            h_fname = f"{output_name}.h"
+            outdir = output_dir
+            
+            cu_flag = ""
+            func_prefix = "srgrz"
+            cons_prefix = "SRGRZ"
+            header_head = (
+                f"#ifndef {output_name.upper()}_H\n"
+                f"#define {output_name.upper()}_H\n\n"
+                f"#include <math.h>\n"
+                f"#include <stdlib.h>\n"
+                f"#include <stddef.h>\n\n"
+                f"#ifndef M_PI\n"
+                f"#define M_PI 3.14159265358979323846\n"
+                f"#endif\n\n"
+                f"static const double SRGRZ_ELEMENTARY_CHARGE = 1.602176634e-19;  /* Elementary charge (C) */\n"
+                f"static const double SRGRZ_ELECTRON_MASS = 9.10938356e-31; /* Electron mass (kg) */\n"
+                f"static const double SRGRZ_EPSILON0        = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
+            )
+            header_tail = f"#endif /* {output_name.upper()}_H */\n"
+            extern_c_beg = ""
+        else:
+            c_fname = "bc_sheath_gyrokinetic_gyraze_surrogate.c"
+            h_fname = "gkyl_bc_sheath_gyrokinetic_gyraze_surrogate.h"
+            outdir = gkeyll_dir if gkeyll_dir is not None else output_dir
+            
+            cu_flag = "GKYL_CU_DH "
+            func_prefix = "bc_sheath_gyrokinetic_srgrz"
+            cons_prefix = "GKYL"
+            header_head = (
+                f"#pragma once\n\n"
+                f"#include <math.h>\n"
+                f"#include <gkyl_const.h>\n"
+                f"#include <gkyl_util.h>\n\n"
+            )
+            header_tail = f"EXTERN_C_END\n\n"
+            extern_c_beg = "EXTERN_C_BEG\n\n"
+        # ── Assemble .c ───────────────────────────────────────────────────────────
+        c_source = (
+            f"/*\n"
+            f" * {c_fname}  –  GYRAZE surrogate model generated from {REPO_INFO}\n"
+            f" */\n"
+            f'#include "{h_fname}"\n'
+            +
+            _c_array(Y_mu,    "Y_mu",    "Output denormalisation mean") +
+            _c_array(Y_sigma, "Y_sigma", "Output denormalisation std-dev") + "\n" +
+            weight_arrays +
+            _c_array(mu_grid, "MU_GRID", f"Fixed evaluation mu-grid ({len(mu_grid)} points)") + "\n" +
+            f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
+            f"{{\n"
+            f"    double x[3] = {{alpha, gamma, phi}};\n"
+            f"{buf_decls}\n"
+            f"{norm_code}\n"
+            f"{layer_code}\n"
+            f"{denorm_code}"
+            f"{filter_negative_code}"
+            f"}}\n\n"
+            + svm_c_code + "\n"
+            
+            f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi)\n"
+            "{\n"
+            f"    double input[3] = {{alpha, gamma, phi}};\n"
+            f"    return (svm_score(input) >= 0.5) ? 1 : 0;\n"
+            "}\n\n"
+            
+            f"{cu_flag}double *{func_prefix}_grid(double *out)\n"
+            f"{{\n"
+            f"    for (int i = 0; i < SRGRZ_N_MU; i++) {{\n"
+            f"        out[i] = MU_GRID[i];\n"
+            f"    }}\n"
+            f"    return out;\n"
+            f"}}\n\n"
+            
+            f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double *out)\n"
+            f"{{\n"
+            f"    int ng = SRGRZ_N_MU;\n"
+            f"    for (int i = 0; i < n; i++) {{\n"
+            f"        double mu = mu_new[i];\n"
+            f"        if (mu <= MU_GRID[0])          {{ out[i] = vcut[0];          continue; }}\n"
+            f"        if (mu >= MU_GRID[ng - 1])     {{ out[i] = vcut[ng - 1];     continue; }}\n"
+            f"        /* binary search for the bracketing interval */\n"
+            f"        int lo = 0, hi = ng - 1;\n"
+            f"        while (hi - lo > 1) {{\n"
+            f"            int mid = (lo + hi) >> 1;\n"
+            f"            if (MU_GRID[mid] <= mu) lo = mid; else hi = mid;\n"
+            f"        }}\n"
+            f"        double t = (mu - MU_GRID[lo]) / (MU_GRID[hi] - MU_GRID[lo]);\n"
+            f"        out[i] = vcut[lo] + t * (vcut[hi] - vcut[lo]);\n"
+            f"    }}\n"
+            f"}}\n\n"
+            
+            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out)\n"
+            f"{{\n"
+            f"    double vcut[SRGRZ_N_MU];\n"
+            f"    {func_prefix}_predict(alpha, gamma, phi, vcut);\n"
+            f"    {func_prefix}_interp(vcut, mu_new, n, out);\n"
+            f"}}\n\n"
+            
+            f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
+            f"    double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
+            f"{{\n"
+            f"    double munorm[n];\n"
+            f"    for (int i = 0; i < n; i++) {{\n"
+            f"        munorm[i] = mu_new[i] * bmag / temperature;\n"
+            f"    }}\n"
+            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
+            f"    double alpha = impact_angle * 180/M_PI;\n"
+            f"    {func_prefix}_eval(munorm, n, alpha, gamma, phinorm, out);\n"
+            f"}}\n"
+        
+            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
+            f"{{\n"
+            f"    // double vcut_const = sqrt({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall) /temperature);\n"
+            f"    double vcut_const = sqrt(-q2Dm * (phi - phi_wall));\n"
+            f"    double vte = sqrt(temperature / {cons_prefix}_ELECTRON_MASS);\n"
+            f"    {func_prefix}_eval_physical(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
+            f"    for (int i = 0; i < n; i++) {{\n"
+            f"        out[i] = pow(out[i] * vte / vcut_const, 2);\n"
+            f"    }}\n"
+            f"}}\n"
+            
+            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact_converged(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
+            f"{{\n"
+            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
+            f"    double alpha = impact_angle * 180/M_PI;\n"
+            f"    int converged = {func_prefix}_converged(alpha, gamma, phinorm);\n"
+            f"    if (converged) {{\n"
+            f"        {func_prefix}_eval_physical_vcut_fact(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
+            f"    }} else {{\n"
+            f"        for (int i = 0; i < n; i++) {{\n"
+            f"            out[i] = 0.0;\n"
+            f"        }}\n"
+            f"    }}\n"
+            f"}}\n"            
+        )
 
-    # ── Assemble .c ───────────────────────────────────────────────────────────
-    c_source = (
-        f"/*\n"
-        f" * {output_name}.c  –  GYRAZE surrogate model generated from {_HERE}\n"
-        f" */\n"
-        f'#include "{header_name}"\n'
-        +
-        # _c_array(X_mu,    "X_mu",    "Input normalisation mean") +
-        # _c_array(X_sigma, "X_sigma", "Input normalisation std-dev") +
-        _c_array(Y_mu,    "Y_mu",    "Output denormalisation mean") +
-        _c_array(Y_sigma, "Y_sigma", "Output denormalisation std-dev") + "\n" +
-        weight_arrays +
-        _c_array(mu_grid, "MU_GRID", f"Fixed evaluation mu-grid ({len(mu_grid)} points)") + "\n" +
-        f"void srgrz_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
-        f"{{\n"
-        f"    double x[3] = {{alpha, gamma, phi}};\n"
-        f"{buf_decls}\n"
-        f"{norm_code}\n"
-        f"{layer_code}\n"
-        f"{denorm_code}"
-        f"{filter_negative_code}"
-        f"}}\n\n"
+        # ── Assemble .h ───────────────────────────────────────────────────────────               
+        h_source = (
+            f"/* {h_fname}  –  GYRAZE surrogate model public API generated from {REPO_INFO} */\n"
+            
+            f"{header_head}"
+            
+            f"/* Number of points in the fixed mu-grid. */\n"
+            f"#define SRGRZ_N_MU {n_mu}\n\n"
+            
+            f"{extern_c_beg}"
+            
+            f"/**\n"
+            f" * Returns 1 if GYRAZE is predicted to converge, 0 otherwise.\n"
+            f" *\n"
+            f" * @param alpha: impact angle in degrees\n"
+            f" * @param gamma: normalised plasma density parameter\n"
+            f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
+            f" */\n"
+            f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi);\n\n"
+            
+            f"/**\n"
+            f" * Runs the NN regression; writes SRGRZ_N_MU predicted v_par_cut values into out[].\n"
+            f" *\n"
+            f" * @param alpha: impact angle in degrees\n"
+            f" * @param gamma: normalised plasma density parameter\n"
+            f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
+            f" */\n"            
+            f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[SRGRZ_N_MU]);\n\n"
+            
+            f"/**\n"
+            f" * Copies the SRGRZ_N_MU-element mu-grid into out[] and returns out.\n"
+            f" *\n"
+            f" * @param out: output array of size SRGRZ_N_MU\n"
+            f" */\n"            
+            f"{cu_flag}double *{func_prefix}_grid(double *out);\n\n"
+            
+            f"/**\n"
+            f" * Linear interpolation of vcut[SRGRZ_N_MU] (on the fixed mu-grid) onto\n"
+            f" * mu_new[n]; results are written into out[n]. Clamps at the grid boundaries.\n"
+            f" *\n"
+            f" * @param vcut:    input array of size SRGRZ_N_MU containing values at the fixed mu-grid\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param out:     output array of size n where interpolated values are written\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double *out);\n\n"
+            
+            f"/**\n"
+            f" * Returns the prediction of a custom mu grid of size n\n"
+            f" *\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param alpha:   impact angle in degrees\n"
+            f" * @param gamma:   normalised plasma density parameter\n"
+            f" * @param phi:     normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
+            f" * @param out:     output array of size n where interpolated values are written\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out);\n\n"
+            
+            f"/**\n"
+            f" * Converts from physical parameters and evaluates on a custom mu grid.\n"
+            f" * Conversion formulas:\n"
+            f" *   munorm  = mu*Bmag / temperature\n"
+            f" *   gamma   = (1/Bmag) * sqrt(m_e * density / eps0)\n"
+            f" *   phinorm = e * phi / temperature\n"
+            f" *\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param phi:     sheath potential (V)\n"
+            f" * @param phi_wall: wall potential (V)\n"
+            f" * @param density:  electron density (m^-3)\n"
+            f" * @param temperature:  electron temperature (eV)\n"
+            f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
+            f" * @param bmag:    magnetic field strength (T)\n"
+            f" * @param impact_angle: magnetic impact angle (radians)\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
+            
+            f"/**\n"
+            f" * Same as srgrz_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
+            f" *\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param phi:     sheath potential (V)\n"
+            f" * @param phi_wall: wall potential (V)\n"
+            f" * @param density:  electron density (m^-3)\n"
+            f" * @param temperature:  electron temperature (eV)\n"
+            f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
+            f" * @param bmag:    magnetic field strength (T)\n"
+            f" * @param impact_angle: magnetic impact angle (radians)\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
+            
+            f"/**\n"
+            f" * Same as srgrz_eval_physical_vcut_fact, but normalises return 0 if gyraze is not converging.\n"
+            f" *\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param phi:     sheath potential (V)\n"
+            f" * @param phi_wall: wall potential (V)\n"
+            f" * @param density:  electron density (m^-3)\n"
+            f" * @param temperature:  electron temperature (eV)\n"
+            f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
+            f" * @param bmag:    magnetic field strength (T)\n"
+            f" * @param impact_angle: magnetic impact angle (radians)\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact_converged(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
+            f"{header_tail}"
+        )
+        os.makedirs(outdir, exist_ok=True)
+        c_path = os.path.join(outdir, c_fname)
+        h_path = os.path.join(outdir, h_fname)
+        with open(c_path, "w") as f:
+            f.write(c_source)
+        with open(h_path, "w") as f:
+            f.write(h_source)
         
-        + svm_c_code + "\n"
-        "int srgrz_converged(double alpha, double gamma, double phi)\n"
-        "{\n"
-        "    double input[3] = {alpha, gamma, phi};\n"
-        "    return (svm_score(input) >= 0.5) ? 1 : 0;\n"
-        "}\n\n"
-        f"double *srgrz_grid(double *out)\n"
-        f"{{\n"
-        f"    for (int i = 0; i < SRGRZ_N_MU; i++) {{\n"
-        f"        out[i] = MU_GRID[i];\n"
-        f"    }}\n"
-        f"    return out;\n"
-        f"}}\n\n"
-        
-        f"void srgrz_interp(const double *vcut, const double *mu_new, int n, double *out)\n"
-        f"{{\n"
-        f"    int ng = SRGRZ_N_MU;\n"
-        f"    for (int i = 0; i < n; i++) {{\n"
-        f"        double mu = mu_new[i];\n"
-        f"        if (mu <= MU_GRID[0])          {{ out[i] = vcut[0];          continue; }}\n"
-        f"        if (mu >= MU_GRID[ng - 1])     {{ out[i] = vcut[ng - 1];     continue; }}\n"
-        f"        /* binary search for the bracketing interval */\n"
-        f"        int lo = 0, hi = ng - 1;\n"
-        f"        while (hi - lo > 1) {{\n"
-        f"            int mid = (lo + hi) >> 1;\n"
-        f"            if (MU_GRID[mid] <= mu) lo = mid; else hi = mid;\n"
-        f"        }}\n"
-        f"        double t = (mu - MU_GRID[lo]) / (MU_GRID[hi] - MU_GRID[lo]);\n"
-        f"        out[i] = vcut[lo] + t * (vcut[hi] - vcut[lo]);\n"
-        f"    }}\n"
-        f"}}\n\n"
-        
-        f"void srgrz_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out)\n"
-        f"{{\n"
-        f"    double vcut[SRGRZ_N_MU];\n"
-        f"    srgrz_predict(alpha, gamma, phi, vcut);\n"
-        f"    srgrz_interp(vcut, mu_new, n, out);\n"
-        f"}}\n\n"
-        
-        f"void srgrz_eval_vcut_fact(const double *mu_new, int n, double alpha, double gamma, double phi, double *out)\n"
-        f"{{\n"
-        f"    double vcut[SRGRZ_N_MU];\n"
-        f"    srgrz_predict(alpha, gamma, phi, vcut);\n"
-        f"    double vcut_const = sqrt(SRGRZ_ELEM_CHARGE * (phi - 0.0) / 1.0);\n"
-        f"    for (int i = 0; i < n; i++) {{\n"
-        f"        out[i] = vcut[i]/vcut_const;\n"
-        f"    }}\n"
-        f"}}\n\n"
-
-        f"void srgrz_eval_physical(\n"
-        f"    const double *mu_new,  int n,\n"
-        f"    double phi,            double phi_wall,\n"
-        f"    double density,         double temperature,\n"
-        f"    double q2Dm,            double bmag,\n"
-        f"    double impact_angle,\n"
-        f"    double *out)\n"
-        f"{{\n"
-        f"    double *munorm = (double*)malloc(n * sizeof(double));\n"
-        f"    for (int i = 0; i < n; i++) {{\n"
-        f"        munorm[i] = mu_new[i] * bmag / temperature;\n"
-        f"    }}\n"
-        f"    double gamma   = (1.0 / bmag) * sqrt(SRGRZ_ELECTRON_MASS * density / SRGRZ_EPS0);\n"
-        f"    double phinorm = SRGRZ_ELEM_CHARGE * (phi - phi_wall) / temperature;\n"
-        f"    double alpha = impact_angle * 180.0 / M_PI;\n"
-        f"    srgrz_eval(munorm, n, alpha, gamma, phinorm, out);\n"
-        f"    free(munorm);\n"
-        f"}}\n"
-        
-        f"void srgrz_eval_physical_vcut_fact(\n"
-        f"    const double *mu_new,  int n,\n"
-        f"    double phi,            double phi_wall,\n"
-        f"    double density,         double temperature,\n"
-        f"    double q2Dm,            double bmag,\n"
-        f"    double impact_angle,\n"
-        f"    double *out)\n"
-        f"{{\n"
-        f"    double vcut_const = sqrt(-q2Dm * (phi - phi_wall));\n"
-        f"    double vte = sqrt(temperature / SRGRZ_ELECTRON_MASS);\n"
-        f"    // double vcut_const = sqrt(SRGRZ_ELEM_CHARGE * (phi - phi_wall) / temperature);\n"
-        f"    srgrz_eval_physical(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
-        f"    for (int i = 0; i < n; i++) {{\n"
-        f"        out[i] = pow(out[i] * vte /vcut_const, 2);\n"
-        f"    }}\n"
-        f"}}\n"
-    )
-
-    # ── Assemble .h ───────────────────────────────────────────────────────────
-    guard = output_name.upper() + "_H"
-    n_mu = len(mu_grid)
-    h_source = (
-        f"/* {header_name}  –  GYRAZE surrogate model public API generated from {_HERE} */\n"
-        f"#ifndef {guard}\n"
-        f"#define {guard}\n\n"
-        f"#include <math.h>\n"
-        f"#include <stdlib.h>\n"
-        f"#include <stddef.h>\n\n"
-        f"#ifndef M_PI\n"
-        f"#define M_PI 3.14159265358979323846\n"
-        f"#endif\n\n"
-        f"static const double SRGRZ_ELEM_CHARGE = 1.602176634e-19;  /* Elementary charge (C) */\n"
-        f"static const double SRGRZ_ELECTRON_MASS = 9.10938356e-31; /* Electron mass (kg) */\n"
-        f"static const double SRGRZ_EPS0        = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
-        f"/* Number of points in the fixed mu-grid. */\n"
-        f"#define SRGRZ_N_MU {n_mu}\n\n"
-        f"/* Returns 1 if GYRAZE is predicted to converge, 0 otherwise. */\n"
-        f"int  srgrz_converged(double alpha, double gamma, double phi);\n\n"
-        f"/* Runs the NN regression; writes SRGRZ_N_MU predicted v_par_cut values into out[]. */\n"
-        f"void srgrz_predict(double alpha, double gamma, double phi, double out[SRGRZ_N_MU]);\n\n"
-        f"/* Copies the SRGRZ_N_MU-element mu-grid into out[] and returns out. */\n"
-        f"double *srgrz_grid(double *out);\n\n"
-        f"/* Linear interpolation of vcut[SRGRZ_N_MU] (on the fixed mu-grid) onto\n"
-        f" * mu_new[n]; results are written into out[n]. Clamps at the grid boundaries. */\n"
-        f"void srgrz_interp(const double *vcut, const double *mu_new, int n, double *out);\n\n"
-        f"/* Returns the prediction of a custom mu grid of size n */\n"
-        f"void srgrz_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out);\n\n"
-        f"/* Converts from physical parameters and evaluates on a custom mu grid.\n"
-        f" * Conversion formulas:\n"
-        f" *   gamma   = (1/Bmag) * sqrt(m_e * density / eps0)\n"
-        f" *   phinorm = e * phi / temperature\n"
-        f" */\n"
-        f"void srgrz_eval_physical(\n"
-        f"    const double *mu_new, int n,\n"
-        f"    double phi, double phi_wall, double density, double temperature, double q2Dm, double bmag, double impact_angle,\n"
-        f"    double *out);\n\n"
-        f"/* Same as srgrz_eval_physical, but normalises output by sqrt(e * (phi - phi_wall) / T_e) */\n"
-        f"void srgrz_eval_physical_vcut_fact(\n"
-        f"    const double *mu_new, int n,\n"
-        f"    double phi, double phi_wall, double density, double temperature, double q2Dm, double bmag, double impact_angle,\n"
-        f"    double *out);\n\n"
-        f"#endif /* {guard} */\n"
-    )
+        print(f"Generated {c_path} and {h_path}")
 
     # ── Assemble test_surrogate.c ─────────────────────────────────────────────
     test_source = (
         f'#include <stdio.h>\n'
         f'#include <stdlib.h>\n'
         f'#include <string.h>\n'
-        f'#include "{header_name}"\n\n'
+        f'#include "{output_name}.h"\n\n'
         f'int main(int argc, char *argv[])\n'
         f'{{\n'
         f'    double alpha = 4.0, gamma = 1.0, phi = 2.5, mu = 1.0;\n'
         f'    double phi_wall = 0.0, density = 1e19, temperature = 100.0;\n'
-        f'    double q2Dm = -2*SRGRZ_ELEM_CHARGE/SRGRZ_ELECTRON_MASS, bmag = 1.0, impact_angle = 0.0;\n'
+        f'    double q2Dm = -2*SRGRZ_ELEMENTARY_CHARGE/SRGRZ_ELECTRON_MASS, bmag = 1.0, impact_angle = 0.0;\n'
         f'    double out[{out_dim}];\n\n'
         f'    if (argc < 2) {{\n'
         f'        fprintf(stderr, "Usage: %s {{predict|eval|physical|physical_vcut_fact}} [args...]\\n", argv[0]);\n'
@@ -415,257 +525,16 @@ def generate_c_code(
         f"\trm -f $(TARGET)\n"
     )
 
-    # ── Assemble Gkeyll kernel ────────────────────────────────────────────────
-    gk_dir         = gkeyll_dir if gkeyll_dir is not None else output_dir
-    gk_c_name      = "bc_sheath_gyrokinetic_gyraze_surrogate.c"
-    gk_h_name      = "gkyl_bc_sheath_gyrokinetic_gyraze_surrogate.h"
-
-    gk_h_source = (
-        f"#pragma once\n\n"
-        f"#include <math.h>\n"
-        f"#include <gkyl_const.h>\n"
-        f"#include <gkyl_util.h>\n\n"
-        
-        f"/* Number of points in the fixed mu-grid. */\n"
-        f"#define SRGRZ_N_MU {n_mu}\n\n"
-        f"EXTERN_C_BEG\n\n"
-        
-        f"/**\n"
-        f" * Returns 1 if GYRAZE is predicted to converge, 0 otherwise.\n"
-        f" *\n"
-        f" * @param alpha: impact angle in degrees\n"
-        f" * @param gamma: normalised plasma density parameter\n"
-        f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
-        f" */\n"
-        f"GKYL_CU_DH int  bc_sheath_gyrokinetic_srgrz_converged(double alpha, double gamma, double phi);\n\n"
-        
-        f"/**\n"
-        f" * Runs the NN regression; writes SRGRZ_N_MU predicted v_par_cut values into out[].\n"
-        f" *\n"
-        f" * @param alpha: impact angle in degrees\n"
-        f" * @param gamma: normalised plasma density parameter\n"
-        f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
-        f" */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_predict(double alpha, double gamma, double phi, double out[SRGRZ_N_MU]);\n\n"
-        
-        f"/**\n"
-        f" * Copies the SRGRZ_N_MU-element mu-grid into out[] and returns out.\n"
-        f" *\n"
-        f" * @param out: output array of size SRGRZ_N_MU\n"
-        f" */\n"
-        f"GKYL_CU_DH double *bc_sheath_gyrokinetic_srgrz_grid(double *out);\n\n"
-        
-        f"/**\n"
-        f" * Linear interpolation of vcut[SRGRZ_N_MU] (on the fixed mu-grid) onto\n"
-        f" * mu_new[n]; results are written into out[n]. Clamps at the grid boundaries.\n"
-        f" *\n"
-        f" * @param vcut:    input array of size SRGRZ_N_MU containing values at the fixed mu-grid\n"
-        f" * @param mu_new:  input array of size n containing the new mu points\n"
-        f" * @param n:       number of points in mu_new and out\n"
-        f" * @param out:     output array of size n where interpolated values are written\n"
-        f" */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_interp(const double *vcut, const double *mu_new, int n, double *out);\n\n"
-        
-        f"/**\n"
-        f" * Returns the prediction of a custom mu grid of size n\n"
-        f" *\n"
-        f" * @param mu_new:  input array of size n containing the new mu points\n"
-        f" * @param n:       number of points in mu_new and out\n"
-        f" * @param alpha:   impact angle in degrees\n"
-        f" * @param gamma:   normalised plasma density parameter\n"
-        f" * @param phi:     normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
-        f" * @param out:     output array of size n where interpolated values are written\n"
-        f" */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out);\n\n"
-        
-        f"/**\n"
-        f" * Converts from physical parameters and evaluates on a custom mu grid.\n"
-        f" * Conversion formulas:\n"
-        f" *   munorm  = mu*Bmag / temperature\n"
-        f" *   gamma   = (1/Bmag) * sqrt(m_e * density / eps0)\n"
-        f" *   phinorm = e * phi / temperature\n"
-        f" *\n"
-        f" * @param mu_new:  input array of size n containing the new mu points\n"
-        f" * @param n:       number of points in mu_new and out\n"
-        f" * @param phi:     sheath potential (V)\n"
-        f" * @param phi_wall: wall potential (V)\n"
-        f" * @param density:  electron density (m^-3)\n"
-        f" * @param temperature:  electron temperature (eV)\n"
-        f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
-        f" * @param bmag:    magnetic field strength (T)\n"
-        f" * @param impact_angle: magnetic impact angle (radians)\n"
-        f" */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical(const double *mu_new, int n, double phi, double phi_wall,\n"
-        f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
-        
-        f"/**\n"
-        f" * Same as srgrz_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
-        f" *\n"
-        f" * @param mu_new:  input array of size n containing the new mu points\n"
-        f" * @param n:       number of points in mu_new and out\n"
-        f" * @param phi:     sheath potential (V)\n"
-        f" * @param phi_wall: wall potential (V)\n"
-        f" * @param density:  electron density (m^-3)\n"
-        f" * @param temperature:  electron temperature (eV)\n"
-        f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
-        f" * @param bmag:    magnetic field strength (T)\n"
-        f" * @param impact_angle: magnetic impact angle (radians)\n"
-        f" */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
-        f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
-        
-        f"/**\n"
-        f" * Same as srgrz_eval_physical_vcut_fact, but normalises return 0 if gyraze is not converging.\n"
-        f" *\n"
-        f" * @param mu_new:  input array of size n containing the new mu points\n"
-        f" * @param n:       number of points in mu_new and out\n"
-        f" * @param phi:     sheath potential (V)\n"
-        f" * @param phi_wall: wall potential (V)\n"
-        f" * @param density:  electron density (m^-3)\n"
-        f" * @param temperature:  electron temperature (eV)\n"
-        f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
-        f" * @param bmag:    magnetic field strength (T)\n"
-        f" * @param impact_angle: magnetic impact angle (radians)\n"
-        f" */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact_converged(const double *mu_new, int n, double phi, double phi_wall,\n"
-        f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
-        f"EXTERN_C_END\n\n"
-    )
-
-    gk_c_source = (
-        f"/*\n"
-        f" * {gk_c_name}  --  GYRAZE surrogate model, Gkeyll kernel generated from {_HERE}\n"
-        f" */\n"
-        f'#include "{gk_h_name}"\n\n'
-        
-        "/*  Normalisation constants   */\n" +
-        # _c_array(X_mu,    "X_mu",    "Input normalisation mean") +
-        # _c_array(X_sigma, "X_sigma", "Input normalisation std-dev") +
-        _c_array(Y_mu,    "Y_mu",    "Output denormalisation mean") +
-        _c_array(Y_sigma, "Y_sigma", "Output denormalisation std-dev") + "\n" +
-        "/*  Network weights & biases   */\n" +
-        weight_arrays +
-        "/*   Mu-grid */\n" +
-        _c_array(mu_grid, "MU_GRID", f"Fixed evaluation mu-grid ({len(mu_grid)} points)") + "\n" +
-        f"/*  Neural-network forward pass  */\n"
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
-        f"{{\n"
-        f"    double x[3] = {{alpha, gamma, phi}};\n"
-        f"{buf_decls}\n"
-        f"{norm_code}\n"
-        f"{layer_code}\n"
-        f"{denorm_code}"
-        f"{filter_negative_code}"
-        f"}}\n\n"
-        + svm_c_code + "\n"
-        
-        "GKYL_CU_DH int bc_sheath_gyrokinetic_srgrz_converged(double alpha, double gamma, double phi)\n"
-        "{\n"
-        "    double input[3] = {alpha, gamma, phi};\n"
-        "    return (svm_score(input) >= 0.5) ? 1 : 0;\n"
-        "}\n\n"
-        
-        f"GKYL_CU_DH double *srgrz_grid(double *out)\n"
-        f"{{\n"
-        f"    for (int i = 0; i < SRGRZ_N_MU; i++) {{\n"
-        f"        out[i] = MU_GRID[i];\n"
-        f"    }}\n"
-        f"    return out;\n"
-        f"}}\n\n"
-        
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_interp(const double *vcut, const double *mu_new, int n, double *out)\n"
-        f"{{\n"
-        f"    int ng = SRGRZ_N_MU;\n"
-        f"    for (int i = 0; i < n; i++) {{\n"
-        f"        double mu = mu_new[i];\n"
-        f"        if (mu <= MU_GRID[0])          {{ out[i] = vcut[0];          continue; }}\n"
-        f"        if (mu >= MU_GRID[ng - 1])     {{ out[i] = vcut[ng - 1];     continue; }}\n"
-        f"        /* binary search for the bracketing interval */\n"
-        f"        int lo = 0, hi = ng - 1;\n"
-        f"        while (hi - lo > 1) {{\n"
-        f"            int mid = (lo + hi) >> 1;\n"
-        f"            if (MU_GRID[mid] <= mu) lo = mid; else hi = mid;\n"
-        f"        }}\n"
-        f"        double t = (mu - MU_GRID[lo]) / (MU_GRID[hi] - MU_GRID[lo]);\n"
-        f"        out[i] = vcut[lo] + t * (vcut[hi] - vcut[lo]);\n"
-        f"    }}\n"
-        f"}}\n\n"
-        
-        f"GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval(const double *mu_new, int n, double alpha, double gamma, double phi, double *out)\n"
-        f"{{\n"
-        f"    double vcut[SRGRZ_N_MU];\n"
-        f"    bc_sheath_gyrokinetic_srgrz_predict(alpha, gamma, phi, vcut);\n"
-        f"    bc_sheath_gyrokinetic_srgrz_interp(vcut, mu_new, n, out);\n"
-        f"}}\n\n"
-        
-        "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
-        "    double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
-        "{\n"
-        "    double munorm[n];\n"
-        "    for (int i = 0; i < n; i++) {\n"
-        "        munorm[i] = mu_new[i] * bmag / temperature;\n"
-        "    }\n"
-        "    double gamma   = (1.0 / bmag) * sqrt(GKYL_ELECTRON_MASS * density / GKYL_EPSILON0);\n"
-        "    double phinorm = (GKYL_ELEMENTARY_CHARGE * phi) / temperature;\n"
-        "    double alpha = impact_angle * 180/M_PI;\n"
-        "    bc_sheath_gyrokinetic_srgrz_eval(munorm, n, alpha, gamma, phinorm, out);\n"
-        "}\n"
-    
-        "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
-        "    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
-        "{\n"
-        "    // double vcut_const = sqrt(GKYL_ELEMENTARY_CHARGE * (phi - phi_wall) /temperature);\n"
-        "    double vcut_const = sqrt(-q2Dm * (phi - phi_wall));\n"
-        "    double vte = sqrt(temperature / GKYL_ELECTRON_MASS);\n"
-        "    bc_sheath_gyrokinetic_srgrz_eval_physical(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
-        "    for (int i = 0; i < n; i++) {\n"
-        "        out[i] = pow(out[i] * vte / vcut_const, 2);\n"
-        "    }\n"
-        "}\n"
-        
-        "GKYL_CU_DH void bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact_converged(const double *mu_new,  int n, double phi, double phi_wall,\n"
-        "    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
-        "{\n"
-        "    double gamma   = (1.0 / bmag) * sqrt(GKYL_ELECTRON_MASS * density / GKYL_EPSILON0);\n"
-        "    double phinorm = (GKYL_ELEMENTARY_CHARGE * phi) / temperature;\n"
-        "    double alpha = impact_angle * 180/M_PI;\n"
-        "    int converged = bc_sheath_gyrokinetic_srgrz_converged(alpha, gamma, phinorm);\n"
-        "    if (converged) {\n"
-        "        bc_sheath_gyrokinetic_srgrz_eval_physical_vcut_fact(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
-        "    } else {\n"
-        "        for (int i = 0; i < n; i++) {\n"
-        "            out[i] = 0.0;\n"
-        "        }\n"
-        "    }\n"
-        "}\n"
-    )
-
-    # ── Write files ───────────────────────────────────────────────────────────
-    c_path    = os.path.join(output_dir, output_name + ".c")
-    h_path    = os.path.join(output_dir, output_name + ".h")
+    # ── Write test code ───────────────────────────────────────────────────────────
     test_path = os.path.join(output_dir, "test_surrogate.c")
     make_path = os.path.join(output_dir, "Makefile")
 
-    with open(c_path, "w") as f:
-        f.write(c_source)
-    with open(h_path, "w") as f:
-        f.write(h_source)
     with open(test_path, "w") as f:
         f.write(test_source)
     with open(make_path, "w") as f:
         f.write(makefile_source)
 
-    os.makedirs(gk_dir, exist_ok=True)
-    gk_c_path = os.path.join(gk_dir, gk_c_name)
-    gk_h_path = os.path.join(gk_dir, gk_h_name)
-
-    with open(gk_c_path, "w") as f:
-        f.write(gk_c_source)
-    with open(gk_h_path, "w") as f:
-        f.write(gk_h_source)
-
-    print(f"Generated {c_path}, {h_path}, {test_path}, {make_path}")
-    print(f"Generated Gkeyll kernel: {gk_c_path}, {gk_h_path}")
+    print(f"Generated {test_path}, {make_path}")
     print(f"Build: cd {output_dir} && make")
 
 
