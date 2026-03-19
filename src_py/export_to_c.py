@@ -203,6 +203,7 @@ def generate_c_code(
                 f"#include <math.h>\n"
                 f"#include <stdlib.h>\n"
                 f"#include <stddef.h>\n\n"
+                f"#include <stdio.h>\n\n"
                 f"#ifndef {cons_prefix}_PI\n"
                 f"#define {cons_prefix}_PI 3.14159265358979323846\n"
                 f"#endif\n\n"
@@ -274,9 +275,129 @@ def generate_c_code(
             f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi)\n"
             "{\n"
             f"    double input[3] = {{alpha, gamma, phi}};\n"
-            f"    return (svm_score(input) >= 0.5) ? 1 : 0;\n"
+            f"    return (svm_score(input) >= 0.0) ? 1 : 0;\n"
             "}\n\n"
-            
+
+            f"/* Finite-difference gradient of svm_score(x) */\n"
+            f"{cu_flag}static void _srgrz_svm_grad(const double *x, double h, double *g)\n"
+            f"{{\n"
+            f"    double xp[3], xm[3];\n"
+            f"    for (int i = 0; i < 3; i++) {{\n"
+            f"        xp[0]=x[0]; xp[1]=x[1]; xp[2]=x[2];\n"
+            f"        xm[0]=x[0]; xm[1]=x[1]; xm[2]=x[2];\n"
+            f"        xp[i] += h; xm[i] -= h;\n"
+            f"        g[i] = (svm_score(xp) - svm_score(xm)) / (2.0*h);\n"
+            f"    }}\n"
+            f"}}\n\n"
+
+            f"/* Project x0 onto the convergent region by minimising\n"
+            f" * f(x) = svm_score(x)^2 + lam*||x-x0||^2 using L-BFGS\n"
+            f" * with Armijo backtracking. Mirrors find_nearest() in surrogate_proj.py.\n"
+            f" * Returns 1 if svm_score(x_out) >= 0.0, 0 otherwise. */\n"
+            f"{cu_flag} int _srgrz_project(const double *x0, double *x_out,\n"
+            f"                             double lam, int maxiter, double tol)\n"
+            f"{{\n"
+            f"    const int N = 3;\n"
+            f"    const int M = 5; /* L-BFGS memory depth */\n"
+            f"    double x[3] = {{x0[0], x0[1], x0[2]}};\n"
+            f"    const double h = 1e-5;\n"
+            f"    double g_prev[3], s_mem[5][3], y_mem[5][3], rho[5];\n"
+            f"    double alpha_ls, q[3], r[3], a_coeff[5];\n"
+            f"    int k = 0, m_stored = 0;\n"
+            f"\n"
+            f"    /* Evaluate initial objective and gradient */\n"
+            f"    double s = svm_score(x);\n"
+            f"    double obj = s*s;\n"
+            f"    double sg[3], g[3];\n"
+            f"    _srgrz_svm_grad(x, h, sg);\n"
+            f"    for (int i = 0; i < N; i++) {{\n"
+            f"        obj += lam*(x[i]-x0[i])*(x[i]-x0[i]);\n"
+            f"        g[i] = 2.0*s*sg[i] + 2.0*lam*(x[i]-x0[i]);\n"
+            f"    }}\n"
+            f"\n"
+            f"    for (int iter = 0; iter < maxiter; iter++) {{\n"
+            f"        /* L-BFGS two-loop recursion to get search direction r = -H*g */\n"
+            f"        for (int i = 0; i < N; i++) q[i] = g[i];\n"
+            f"        int bound = m_stored;\n"
+            f"        for (int j = bound - 1; j >= 0; j--) {{\n"
+            f"            int idx = (k - 1 - (bound - 1 - j) + M * M) % M;\n"
+            f"            double dot = 0;\n"
+            f"            for (int i = 0; i < N; i++) dot += s_mem[idx][i] * q[i];\n"
+            f"            a_coeff[j] = rho[idx] * dot;\n"
+            f"            for (int i = 0; i < N; i++) q[i] -= a_coeff[j] * y_mem[idx][i];\n"
+            f"        }}\n"
+            f"        /* Scale: H0 = (s'y)/(y'y) * I */\n"
+            f"        double gamma_lbfgs = 1.0;\n"
+            f"        if (m_stored > 0) {{\n"
+            f"            int idx = (k - 1 + M) % M;\n"
+            f"            double sy = 0, yy = 0;\n"
+            f"            for (int i = 0; i < N; i++) {{\n"
+            f"                sy += s_mem[idx][i] * y_mem[idx][i];\n"
+            f"                yy += y_mem[idx][i] * y_mem[idx][i];\n"
+            f"            }}\n"
+            f"            if (yy > 0) gamma_lbfgs = sy / yy;\n"
+            f"        }}\n"
+            f"        for (int i = 0; i < N; i++) r[i] = gamma_lbfgs * q[i];\n"
+            f"        for (int j = 0; j < bound; j++) {{\n"
+            f"            int idx = (k - bound + j + M * M) % M;\n"
+            f"            double dot = 0;\n"
+            f"            for (int i = 0; i < N; i++) dot += y_mem[idx][i] * r[i];\n"
+            f"            double beta = rho[idx] * dot;\n"
+            f"            for (int i = 0; i < N; i++) r[i] += s_mem[idx][i] * (a_coeff[j] - beta);\n"
+            f"        }}\n"
+            f"        /* Search direction = -r */\n"
+            f"        for (int i = 0; i < N; i++) r[i] = -r[i];\n"
+            f"\n"
+            f"        /* Armijo backtracking line search */\n"
+            f"        double dg = 0;\n"
+            f"        for (int i = 0; i < N; i++) dg += g[i] * r[i];\n"
+            f"        alpha_ls = 1.0;\n"
+            f"        for (int ls = 0; ls < 40; ls++) {{\n"
+            f"            double xn[3] = {{x[0]+alpha_ls*r[0], x[1]+alpha_ls*r[1], x[2]+alpha_ls*r[2]}};\n"
+            f"            double sn = svm_score(xn);\n"
+            f"            double obj_n = sn*sn;\n"
+            f"            for (int i = 0; i < N; i++) obj_n += lam*(xn[i]-x0[i])*(xn[i]-x0[i]);\n"
+            f"            if (obj_n <= obj + 1e-4*alpha_ls*dg) break;\n"
+            f"            alpha_ls *= 0.5;\n"
+            f"        }}\n"
+            f"\n"
+            f"        /* Update x and store L-BFGS vectors */\n"
+            f"        for (int i = 0; i < N; i++) g_prev[i] = g[i];\n"
+            f"        double step2 = 0.0;\n"
+            f"        int sidx = k % M;\n"
+            f"        for (int i = 0; i < N; i++) {{\n"
+            f"            double dx = alpha_ls * r[i];\n"
+            f"            s_mem[sidx][i] = dx;\n"
+            f"            x[i] += dx;\n"
+            f"            step2 += dx*dx;\n"
+            f"        }}\n"
+            f"        if (step2 < tol*tol) break;\n"
+            f"\n"
+            f"        /* Recompute objective and gradient at new x */\n"
+            f"        s = svm_score(x);\n"
+            f"        obj = s*s;\n"
+            f"        _srgrz_svm_grad(x, h, sg);\n"
+            f"        for (int i = 0; i < N; i++) {{\n"
+            f"            obj += lam*(x[i]-x0[i])*(x[i]-x0[i]);\n"
+            f"            g[i] = 2.0*s*sg[i] + 2.0*lam*(x[i]-x0[i]);\n"
+            f"        }}\n"
+            f"\n"
+            f"        /* y = g_new - g_old */\n"
+            f"        double sy = 0;\n"
+            f"        for (int i = 0; i < N; i++) {{\n"
+            f"            y_mem[sidx][i] = g[i] - g_prev[i];\n"
+            f"            sy += s_mem[sidx][i] * y_mem[sidx][i];\n"
+            f"        }}\n"
+            f"        if (sy > 1e-20) {{\n"
+            f"            rho[sidx] = 1.0 / sy;\n"
+            f"            k++;\n"
+            f"            if (m_stored < M) m_stored++;\n"
+            f"        }}\n"
+            f"    }}\n"
+            f"    x_out[0]=x[0]; x_out[1]=x[1]; x_out[2]=x[2];\n"
+            f"    return (svm_score(x_out) >= 0.0) ? 1 : 0;\n"
+            f"}}\n\n"
+
             f"{cu_flag}double *{func_prefix}_grid(double *out)\n"
             f"{{\n"
             f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
@@ -305,19 +426,45 @@ def generate_c_code(
             f"    }}\n"
             f"}}\n\n"
             
+            f"{cu_flag} int {func_prefix}_project(double alpha, double gamma, double phi, double *alpha_proj, double *gamma_proj, double *phi_proj)\n"
+            f"{{\n"
+            f"    /* If already converged, return original point unchanged (matches Python). */\n"
+            f"    if ({func_prefix}_converged(alpha, gamma, phi)) {{\n"
+            f"        *alpha_proj = alpha;\n"
+            f"        *gamma_proj = gamma;\n"
+            f"        *phi_proj = phi;\n"
+            f"        return 1;\n"
+            f"    }}\n"
+            f"    double x0[3] = {{alpha, gamma, phi}};\n"
+            f"    double xp[3];\n"
+            f"    int converged = _srgrz_project(x0, xp, 1e-3, 500, 1e-6);\n"
+            f"    *alpha_proj = xp[0];\n"
+            f"    *gamma_proj = xp[1];\n"
+            f"    *phi_proj = xp[2];\n"
+            f"    return converged;\n"
+            f"}}\n\n"
+
             f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out)\n"
             f"{{\n"
             f"    double vcut[SRGRZ_N_MU];\n"
             f"    {func_prefix}_predict(alpha, gamma, phi, vcut);\n"
             f"    {func_prefix}_interp(vcut, mu_new, n, mu_ref, out);\n"
             f"}}\n\n"
-            
+
+            f"{cu_flag}void {func_prefix}_proj_eval(const double *mu_new, int n, double mu_ref,\n"
+            f"    double alpha, double gamma, double phi, double *out)\n"
+            f"{{\n"
+            f"    double xp[3];\n"
+            f"    {func_prefix}_project(alpha, gamma, phi, &xp[0], &xp[1], &xp[2]);\n"
+            f"    {func_prefix}_eval(mu_new, n, mu_ref, xp[0], xp[1], xp[2], out);\n"
+            f"}}\n\n"
+
             f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
-            f"    double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
+            f"    double temperature, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
             f"    double muref = temperature / bmag;\n"
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
-            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
             f"    {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
             f"}}\n"
@@ -325,30 +472,50 @@ def generate_c_code(
             f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
-            f"    // double vcut_const = sqrt({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall) /temperature);\n"
-            f"    double vcut_const = sqrt(-q2Dm * (phi - phi_wall));\n"
-            f"    double vte = sqrt(temperature / {cons_prefix}_ELECTRON_MASS);\n"
-            f"    {func_prefix}_eval_physical(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
-            f"    for (int i = 0; i < n; i++) {{\n"
-            f"        out[i] = pow(out[i] * vte / vcut_const, 2);\n"
+            f"    double muref = temperature / bmag;\n"
+            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
+            f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
+            f"    if (phinorm > 0.05) {{\n"
+            f"      {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            
+            f"      double vcut_const_sq = -q2Dm * (phi - phi_wall);\n"
+            f"      double vte_sq = temperature / {cons_prefix}_ELECTRON_MASS;\n"
+            f"      for (int i = 0; i < n; i++)\n"
+            f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
+            f"    }} else {{\n"
+            f"      for (int i = 0; i < n; i++)\n"
+            f"        out[i] = 1.0;\n"
             f"    }}\n"
             f"}}\n"
             
-            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact_converged(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_eval_proj_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
-            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
-            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
+            f"    double gamma = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
-            f"    int converged = {func_prefix}_converged(alpha, gamma, phinorm);\n"
-            f"    if (converged) {{\n"
-            f"        {func_prefix}_eval_physical_vcut_fact(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
+            f"    double muref = temperature / bmag;\n\n"
+            f"    if (phinorm > 0.05) {{\n"
+            f"      if (!{func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
+            f"        double xp[3];\n"
+            f"        {func_prefix}_project(alpha, gamma, phinorm, &xp[0], &xp[1], &xp[2]);\n"
+            f"        alpha = xp[0];\n"
+            f"        gamma = xp[1];\n"
+            f"        phinorm = xp[2];\n"
+            f"      }}\n"
+            
+            f"      {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            
+            f"      double vcut_const_sq = -q2Dm * (phi - phi_wall);\n"
+            f"      double vte_sq = temperature / {cons_prefix}_ELECTRON_MASS;\n"
+            f"      for (int i = 0; i < n; i++)\n"
+            f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
-            f"        for (int i = 0; i < n; i++) {{\n"
-            f"            out[i] = 0.0;\n"
-            f"        }}\n"
+            f"      for (int i = 0; i < n; i++)\n"
+            f"        out[i] = 1.0;\n"
             f"    }}\n"
-            f"}}\n"            
+            f"}}\n"        
         )
 
         # ── Assemble .h ───────────────────────────────────────────────────────────               
@@ -401,6 +568,22 @@ def generate_c_code(
             f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out);\n\n"
             
             f"/**\n"
+            f" * Projects (alpha, gamma, phi) onto the nearest convergent point in parameter space.\n"
+            f" * The projection minimises svm_score(x)^2 + 1e-3*||x-x0||^2 via gradient descent\n"
+            f" * with Armijo backtracking (mirrors find_nearest() in surrogate_proj.py).\n"
+            f" * Returns 1 if the projected point is convergent, 0 otherwise.\n"
+            f" *\n"
+            f" * @param alpha: impact angle in degrees\n"
+            f" * @param gamma: normalised plasma density parameter\n"
+            f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
+            f" * @param alpha_proj: pointer to where the projected impact angle (degrees) is written\n"
+            f" * @param gamma_proj: pointer to where the projected gamma is written\n"
+            f" * @param phi_proj:   pointer to where the projected phi is written\n"
+            f" */\n"
+            f"{cu_flag}int {func_prefix}_project(double alpha, double gamma, double phi,\n"
+            f"                             double *alpha_proj, double *gamma_proj, double *phi_proj);\n\n"
+            
+            f"/**\n"
             f" * Returns the prediction of a custom mu grid of size n\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
@@ -412,7 +595,24 @@ def generate_c_code(
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
             f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out);\n\n"
-            
+
+            f"/**\n"
+            f" * Like {func_prefix}_eval, but projects (alpha, gamma, phi) onto the nearest\n"
+            f" * convergent point in parameter space when GYRAZE is predicted not to converge.\n"
+            f" * The projection minimises svm_score(x)^2 + 1e-3*||x-x0||^2 via gradient\n"
+            f" * descent with Armijo backtracking (mirrors find_nearest() in surrogate_proj.py).\n"
+            f" *\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param mu_ref:  reference mu value for normalisation (e.g. temperature / Bmag)\n"
+            f" * @param alpha:   impact angle in degrees\n"
+            f" * @param gamma:   normalised plasma density parameter\n"
+            f" * @param phi:     normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
+            f" * @param out:     output array of size n where interpolated values are written\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_proj_eval(const double *mu_new, int n, double mu_ref,\n"
+            f"    double alpha, double gamma, double phi, double *out);\n\n"
+
             f"/**\n"
             f" * Converts from physical parameters and evaluates on a custom mu grid.\n"
             f" * Conversion formulas:\n"
@@ -426,15 +626,14 @@ def generate_c_code(
             f" * @param phi_wall: wall potential (V)\n"
             f" * @param density:  electron density (m^-3)\n"
             f" * @param temperature:  electron temperature (eV)\n"
-            f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
             f" * @param bmag:    magnetic field strength (T)\n"
             f" * @param impact_angle: magnetic impact angle (radians)\n"
             f" */\n"
             f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall,\n"
-            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
+            f"    double density, double temperature, double bmag, double impact_angle, double *out);\n\n"
             
             f"/**\n"
-            f" * Same as srgrz_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
+            f" * Same as {func_prefix}_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
@@ -462,7 +661,7 @@ def generate_c_code(
             f" * @param bmag:    magnetic field strength (T)\n"
             f" * @param impact_angle: magnetic impact angle (radians)\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact_converged(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_eval_proj_physical_vcut_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
             f"{header_tail}"
         )
@@ -489,7 +688,7 @@ def generate_c_code(
         f'    double q2Dm = -2*SRGRZ_ELEMENTARY_CHARGE/SRGRZ_ELECTRON_MASS, bmag = 1.0, impact_angle = 0.0;\n'
         f'    double out[{out_dim}];\n\n'
         f'    if (argc < 2) {{\n'
-        f'        fprintf(stderr, "Usage: %s {{predict|eval|physical|physical_vcut_fact}} [args...]\\n", argv[0]);\n'
+        f'        fprintf(stderr, "Usage: %s {{predict|eval|physical|physical_vcut_fact|physical_proj_vcut_fact}} [args...]\\n", argv[0]);\n'
         f'        fprintf(stderr, "\\n  predict [alpha [gamma [phi]]]:\\n");\n'
         f'        fprintf(stderr, "    Evaluate full surrogate at (alpha, gamma, phi)\\n");\n'
         f'        fprintf(stderr, "    Returns {out_dim} values (one for each mu grid point)\\n");\n'
@@ -500,6 +699,8 @@ def generate_c_code(
         f'        fprintf(stderr, "    Evaluate at single mu using physical parameters\\n");\n'
         f'        fprintf(stderr, "\\n  physical_vcut_fact mu [phi [phi_wall [density [temperature [q2Dm [bmag [impact_angle]]]]]]]:\\n");\n'
         f'        fprintf(stderr, "    Evaluate at single mu using physical parameters and normalise by sqrt(e * (phi - phi_wall) / T_e)\\n");\n'
+        f'        fprintf(stderr, "\\n  proj_physical_vcut_fact mu [phi [phi_wall [density [temperature [q2Dm [bmag [impact_angle]]]]]]]:\\n");\n'
+        f'        fprintf(stderr, "    Same as physical_vcut_fact but projects (alpha, gamma, phi) onto nearest convergent point if not converging\\n");\n'
         f'        return 1;\n'
         f'    }}\n\n'
         f'    if (strcmp(argv[1], "predict") == 0) {{\n'
@@ -529,10 +730,9 @@ def generate_c_code(
         f'        if (argc > 4) phi_wall = atof(argv[4]);\n'
         f'        if (argc > 5) density = atof(argv[5]);\n'
         f'        if (argc > 6) temperature = atof(argv[6]);\n'
-        f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
-        f'        if (argc > 8) bmag = atof(argv[8]);\n'
-        f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
-        f'        srgrz_eval_physical(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
+        f'        if (argc > 7) bmag = atof(argv[7]);\n'
+        f'        if (argc > 8) impact_angle = atof(argv[8]);\n\n'
+        f'        srgrz_eval_physical(&mu, 1, phi, phi_wall, density, temperature, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
         f'    }}\n'
         f'    else if (strcmp(argv[1], "physical_vcut_fact") == 0) {{\n'
@@ -548,9 +748,56 @@ def generate_c_code(
         f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
         f'        srgrz_eval_physical_vcut_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
+        f'    }} else if (strcmp(argv[1], "proj_physical_vcut_fact") == 0) {{\n'
+        f'        double result;\n\n'
+        f'        /* Parse arguments */\n'
+        f'        if (argc > 2) mu = atof(argv[2]);\n'
+        f'        if (argc > 3) phi = atof(argv[3]);\n'
+        f'        if (argc > 4) phi_wall = atof(argv[4]);\n'
+        f'        if (argc > 5) density = atof(argv[5]);\n'
+        f'        if (argc > 6) temperature = atof(argv[6]);\n'
+        f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
+        f'        if (argc > 8) bmag = atof(argv[8]);\n'
+        f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
+        f'        srgrz_eval_proj_physical_vcut_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
+        f'        printf("out = %.6f\\n", result);\n\n'
         f'    }} else {{\n'
         f'        fprintf(stderr, "Unknown mode: %s\\n", argv[1]);\n'
-        f'        fprintf(stderr, "Use \'predict\', \'eval\', or \'physical\'\\n");\n'
+        f'        fprintf(stderr, "Use \'predict\', \'eval\', \'physical\', \'physical_vcut_fact\', or \'proj_physical_vcut_fact\'\\n");\n'
+        f'        return 1;\n'
+        f'    }}\n\n'
+        f'    return 0;\n'
+        f'}}\n'
+    )
+    
+    test_proj_source = (
+        f'#include <stdio.h>\n'
+        f'#include <stdlib.h>\n'
+        f'#include <string.h>\n'
+        f'#include "{output_name}.h"\n\n'
+        f'int main(int argc, char *argv[])\n'
+        f'{{\n'
+        f'    double alpha = 4.0, gamma = 1.0, phi = 2.5;\n'
+        f'    if (argc < 2) {{\n'
+        f'        fprintf(stderr, "Usage: %s {{project}} [args...]\\n", argv[0]);\n'
+        f'        fprintf(stderr, "\\n  project [alpha [gamma [phi]]]:\\n");\n'
+        f'        fprintf(stderr, "    Project (alpha, gamma, phi) onto nearest convergent point and evaluate at the projection\\n");\n'
+        f'        return 1;\n'
+        f'    }}\n\n'
+        f'    if (strcmp(argv[1], "project") == 0) {{\n'
+        f'        /* Parse optional arguments */\n'
+        f'        if (argc > 2) alpha = atof(argv[2]);\n'
+        f'        if (argc > 3) gamma = atof(argv[3]);\n'
+        f'        if (argc > 4) phi = atof(argv[4]);\n\n'
+        f"        double xp[3];\n"
+        f"        int converged = srgrz_project(alpha, gamma, phi, &xp[0], &xp[1], &xp[2]);\n"
+        f"        if (!converged) {{\n"
+        f"            fprintf(stderr, \"Warning: Projection did not converge for (alpha, gamma, phi) = (%f, %f, %f)\\n\", alpha, gamma, phi);\n"
+        f"        }}\n"
+        f"        printf(\"Projected (alpha, gamma, phi) = (%f, %f, %f)\\n\", xp[0], xp[1], xp[2]);\n"
+        f'    }} else {{\n'
+        f'        fprintf(stderr, "Unknown mode: %s\\n", argv[1]);\n'
+        f'        fprintf(stderr, "Use \'project\'\\n");\n'
         f'        return 1;\n'
         f'    }}\n\n'
         f'    return 0;\n'
@@ -559,28 +806,38 @@ def generate_c_code(
 
     # ── Assemble Makefile ─────────────────────────────────────────────────────
     makefile_source = (
-        f"CC      = gcc\n"
-        f"CFLAGS  = -O2 -Wall\n"
-        f"LIBS    = -lm\n\n"
-        f"TARGET  = test_surrogate\n"
-        f"SRCS    = test_surrogate.c {output_name}.c\n\n"
-        f"all: $(TARGET)\n\n"
-        f"$(TARGET): $(SRCS)\n"
-        f"\t$(CC) $(CFLAGS) -o $@ $^ $(LIBS)\n\n"
+        f"CC = gcc\n"
+        f"CFLAGS = -O3 -Wall -Wextra\n"
+        f"LDLIBS = -lm\n\n"
+        f"SURROGATE_SRC = {output_name}.c\n"
+        f"SURROGATE_OBJ = $(SURROGATE_SRC:.c=.o)\n"
+        f"TEST_SRGRZ_OBJ = test_surrogate.o\n"
+        f"TEST_PROJ_OBJ = test_projection.o\n\n"
+        f"EXECS = test_surrogate test_projection\n\n"
+        f"all: $(EXECS)\n\n"
+        f"test_surrogate: $(TEST_SRGRZ_OBJ) $(SURROGATE_OBJ)\n"
+        f"\t$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)\n\n"
+        f"test_projection: $(TEST_PROJ_OBJ) $(SURROGATE_OBJ)\n"
+        f"\t$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)\n\n"
+        f"%.o: %.c {output_name}.h\n"
+        f"\t$(CC) $(CFLAGS) -c $<\n\n"
         f"clean:\n"
-        f"\trm -f $(TARGET)\n"
+        f"\trm -f $(TEST_SRGRZ_OBJ) $(TEST_PROJ_OBJ) $(SURROGATE_OBJ) $(EXECS)\n"
     )
 
     # ── Write test code ───────────────────────────────────────────────────────────
     test_path = os.path.join(output_dir, "test_surrogate.c")
+    test_proj_path = os.path.join(output_dir, "test_projection.c")
     make_path = os.path.join(output_dir, "Makefile")
 
     with open(test_path, "w") as f:
         f.write(test_source)
+    with open(test_proj_path, "w") as f:
+        f.write(test_proj_source)
     with open(make_path, "w") as f:
         f.write(makefile_source)
 
-    print(f"Generated {test_path}, {make_path}")
+    print(f"Generated {test_path}, {test_proj_path}, {make_path}")
     print(f"Build: cd {output_dir} && make")
 
 
