@@ -57,18 +57,50 @@ def _c_array(values, name, comment=""):
     return s
 
 
-def _dense_layer_c(i, in_dim, out_dim, activation):
+def _dense_layer_c(i, in_dim, out_dim, activation, weights_ptr="w"):
     """Emit C code for one dense layer with optional SiLU activation."""
+    pfx = f"{weights_ptr}->" if weights_ptr else ""
     lines = [f"    /* --- layer {i} --- */"]
     for o in range(out_dim):
-        acc = f"b{i}[{o}]"
+        acc = f"{pfx}b{i}[{o}]"
         for k in range(in_dim):
-            acc += f" + W{i}[{o}*{in_dim}+{k}]*h{i}[{k}]"
+            acc += f" + {pfx}W{i}[{o}*{in_dim}+{k}]*h{i}[{k}]"
         lines.append(f"    h{i+1}[{o}] = {acc};")
     if activation == "silu":
         lines.append(f"    for (int _j = 0; _j < {out_dim}; _j++)")
         lines.append(f"        h{i+1}[_j] = h{i+1}[_j] / (1.0f + expf(-h{i+1}[_j]));")
     lines.append("")
+    return "\n".join(lines)
+
+
+def _c_struct_def(layer_dims, out_dim, n_mu, type_name):
+    """Generate the typedef struct for weight storage."""
+    lines = ["/* --- weight storage type --- **/", f"typedef struct {{"]
+    for i, (in_d, out_d) in enumerate(layer_dims):
+        lines.append(f"  double W{i}[{in_d * out_d}], b{i}[{out_d}];")
+    lines.append(f"  double Y_mu[{out_dim}], Y_sigma[{out_dim}];")
+    lines.append(f"  double MU_GRID[{n_mu}];")
+    lines.append(f"}} {type_name};\n")
+    return "\n".join(lines) + "\n"
+
+
+def _c_struct_fields(linear_layers, Y_mu, Y_sigma, mu_grid):
+    """Generate the designated initializer fields for the weight struct."""
+    lines = []
+    for i, layer in enumerate(linear_layers):
+        W = layer.weight.detach().numpy()
+        b = layer.bias.detach().numpy()
+        W_body = ", ".join(f"{v:.8f}f" for v in W.flatten())
+        b_body = ", ".join(f"{v:.8f}f" for v in b.flatten())
+        lines.append(f"  /* Layer {i} weights ({layer.out_features} x {layer.in_features}) */")
+        lines.append(f"  .W{i} = {{{W_body}}},")
+        lines.append(f"  .b{i} = {{{b_body}}},")
+    Y_mu_body    = ", ".join(f"{v:.8f}f" for v in Y_mu)
+    Y_sigma_body = ", ".join(f"{v:.8f}f" for v in Y_sigma)
+    mu_body      = ", ".join(f"{v:.8f}f" for v in mu_grid)
+    lines.append(f"  .Y_mu    = {{{Y_mu_body}}},")
+    lines.append(f"  .Y_sigma = {{{Y_sigma_body}}},")
+    lines.append(f"  .MU_GRID = {{{mu_body}}}")
     return "\n".join(lines)
 
 
@@ -122,14 +154,7 @@ def generate_c_code(
     layer_dims    = [(l.in_features, l.out_features) for l in linear_layers]
     n_layers      = len(linear_layers)
 
-    weight_arrays = ""
-    for i, layer in enumerate(linear_layers):
-        W = layer.weight.detach().numpy()
-        b = layer.bias.detach().numpy()
-        weight_arrays += _c_array(W.flatten(), f"W{i}",
-                                  f"Layer {i} weights ({layer.out_features} x {layer.in_features})")
-        weight_arrays += _c_array(b, f"b{i}", f"Layer {i} biases ({layer.out_features})")
-        weight_arrays += "\n"
+    struct_fields = _c_struct_fields(linear_layers, Y_mu, Y_sigma, mu_grid)
 
     # ── Build NN forward-pass C code ──────────────────────────────────────────
     buf_decls = "    double h0[3];\n"
@@ -148,7 +173,7 @@ def generate_c_code(
     denorm_code = (
         "    /* output denormalisation */\n"
         f"    for (int _j = 0; _j < {out_dim}; _j++)\n"
-        f"        out[_j] = h{n_layers}[_j] * Y_sigma[_j] + Y_mu[_j];\n"
+        f"        out[_j] = h{n_layers}[_j] * w->Y_sigma[_j] + w->Y_mu[_j];\n"
     )
     filter_negative_code = (
         "    /* enforce non-negativity of the output (physically vcut cannot be negative) */\n"
@@ -158,7 +183,7 @@ def generate_c_code(
 
     # ── SVM via m2cgen ────────────────────────────────────────────────────────
     svm_c_code = m2c.export_to_c(clf)
-    svm_c_code = svm_c_code.replace("double score(", "static double svm_score(")
+    svm_c_code = svm_c_code.replace("double score(", "double svm_score(")
     # remove redundent "#include <math.h>" from svm_c_code since it's already included in the header
     svm_c_code = svm_c_code.replace("#include <math.h>\n", "")
 
@@ -178,12 +203,12 @@ def generate_c_code(
                 f"#include <math.h>\n"
                 f"#include <stdlib.h>\n"
                 f"#include <stddef.h>\n\n"
-                f"#ifndef M_PI\n"
-                f"#define M_PI 3.14159265358979323846\n"
+                f"#ifndef {cons_prefix}_PI\n"
+                f"#define {cons_prefix}_PI 3.14159265358979323846\n"
                 f"#endif\n\n"
-                f"static const double SRGRZ_ELEMENTARY_CHARGE = 1.602176634e-19;  /* Elementary charge (C) */\n"
-                f"static const double SRGRZ_ELECTRON_MASS = 9.10938356e-31; /* Electron mass (kg) */\n"
-                f"static const double SRGRZ_EPSILON0 = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
+                f"static const double {cons_prefix}_ELEMENTARY_CHARGE = 1.602176634e-19;  /* Elementary charge (C) */\n"
+                f"static const double {cons_prefix}_ELECTRON_MASS = 9.10938356e-31; /* Electron mass (kg) */\n"
+                f"static const double {cons_prefix}_EPSILON0 = 8.8541878128e-12; /* Vacuum permittivity (F/m) */\n\n"
             )
             header_tail = f"#endif /* {output_name.upper()}_H */\n"
             extern_c_beg = ""
@@ -203,19 +228,40 @@ def generate_c_code(
             )
             header_tail = f"EXTERN_C_END\n\n"
             extern_c_beg = "EXTERN_C_BEG\n\n"
+        type_name = "srgrz_weights_t"
+        inst_name = "srgrz_w"
+        struct_def = _c_struct_def(layer_dims, out_dim, n_mu, type_name)
+        if code_gen == 'gkyl':
+            struct_instances = (
+                f"/* host copy – visible in the __host__ pass */\n"
+                f"static const {type_name} {inst_name}_h = {{\n{struct_fields}\n}};\n\n"
+                f"/* device copy – visible in the __device__ pass */\n"
+                f"#ifdef GKYL_HAVE_CUDA\n"
+                f"__device__ static const {type_name} {inst_name}_d = {{\n{struct_fields}\n}};\n"
+                f"#endif\n\n"
+                f"/* Select the right copy based on compilation context */\n"
+                f"#ifdef __CUDA_ARCH__\n"
+                f"#  define SRGRZ_WEIGHTS {inst_name}_d\n"
+                f"#else\n"
+                f"#  define SRGRZ_WEIGHTS {inst_name}_h\n"
+                f"#endif\n\n"
+            )
+        else:
+            struct_instances = (
+                f"/* host copy */\n"
+                f"static const {type_name} {inst_name}_h = {{\n{struct_fields}\n}};\n"
+                f"#define SRGRZ_WEIGHTS {inst_name}_h\n\n"
+            )
         # ── Assemble .c ───────────────────────────────────────────────────────────
         c_source = (
             f"/*\n"
             f" * {c_fname}  –  GYRAZE surrogate model generated from {REPO_INFO}\n"
             f" */\n"
-            f'#include "{h_fname}"\n'
-            +
-            _c_array(Y_mu,    "Y_mu",    "Output denormalisation mean") +
-            _c_array(Y_sigma, "Y_sigma", "Output denormalisation std-dev") + "\n" +
-            weight_arrays +
-            _c_array(mu_grid, "MU_GRID", f"Fixed evaluation mu-grid ({len(mu_grid)} points)") + "\n" +
+            f'#include "{h_fname}"\n\n'
+            + struct_instances +
             f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
             f"{{\n"
+            f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
             f"    double x[3] = {{alpha, gamma, phi}};\n"
             f"{buf_decls}\n"
             f"{norm_code}\n"
@@ -223,7 +269,7 @@ def generate_c_code(
             f"{denorm_code}"
             f"{filter_negative_code}"
             f"}}\n\n"
-            + svm_c_code + "\n"
+            + cu_flag + svm_c_code + "\n"
             
             f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi)\n"
             "{\n"
@@ -233,26 +279,28 @@ def generate_c_code(
             
             f"{cu_flag}double *{func_prefix}_grid(double *out)\n"
             f"{{\n"
+            f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
             f"    for (int i = 0; i < SRGRZ_N_MU; i++) {{\n"
-            f"        out[i] = MU_GRID[i];\n"
+            f"        out[i] = w->MU_GRID[i];\n"
             f"    }}\n"
             f"    return out;\n"
             f"}}\n\n"
             
             f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out)\n"
             f"{{\n"
+            f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
             f"    int ng = SRGRZ_N_MU;\n"
             f"    for (int i = 0; i < n; i++) {{\n"
             f"        double mu = mu_new[i]/mu_ref;\n"
-            f"        if (mu <= MU_GRID[0])          {{ out[i] = vcut[0];          continue; }}\n"
-            f"        if (mu >= MU_GRID[ng - 1])     {{ out[i] = vcut[ng - 1];     continue; }}\n"
+            f"        if (mu <= w->MU_GRID[0])          {{ out[i] = vcut[0];          continue; }}\n"
+            f"        if (mu >= w->MU_GRID[ng - 1])     {{ out[i] = vcut[ng - 1];     continue; }}\n"
             f"        /* binary search for the bracketing interval */\n"
             f"        int lo = 0, hi = ng - 1;\n"
             f"        while (hi - lo > 1) {{\n"
             f"            int mid = (lo + hi) >> 1;\n"
-            f"            if (MU_GRID[mid] <= mu) lo = mid; else hi = mid;\n"
+            f"            if (w->MU_GRID[mid] <= mu) lo = mid; else hi = mid;\n"
             f"        }}\n"
-            f"        double t = (mu - MU_GRID[lo]) / (MU_GRID[hi] - MU_GRID[lo]);\n"
+            f"        double t = (mu - w->MU_GRID[lo]) / (w->MU_GRID[hi] - w->MU_GRID[lo]);\n"
             f"        out[i] = vcut[lo] + t * (vcut[hi] - vcut[lo]);\n"
             f"    }}\n"
             f"}}\n\n"
@@ -270,7 +318,7 @@ def generate_c_code(
             f"    double muref = temperature / bmag;\n"
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
-            f"    double alpha = impact_angle * 180/M_PI;\n"
+            f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
             f"    {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
             f"}}\n"
         
@@ -291,7 +339,7 @@ def generate_c_code(
             f"{{\n"
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * phi) / temperature;\n"
-            f"    double alpha = impact_angle * 180/M_PI;\n"
+            f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
             f"    int converged = {func_prefix}_converged(alpha, gamma, phinorm);\n"
             f"    if (converged) {{\n"
             f"        {func_prefix}_eval_physical_vcut_fact(mu_new, n, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, out);\n"
@@ -311,7 +359,8 @@ def generate_c_code(
             
             f"/* Number of points in the fixed mu-grid. */\n"
             f"#define SRGRZ_N_MU {n_mu}\n\n"
-            
+
+            f"{struct_def}"
             f"{extern_c_beg}"
             
             f"/**\n"
@@ -438,7 +487,6 @@ def generate_c_code(
         f'    double alpha = 4.0, gamma = 1.0, phi = 2.5, mu = 1.0;\n'
         f'    double phi_wall = 0.0, density = 1e19, temperature = 100.0;\n'
         f'    double q2Dm = -2*SRGRZ_ELEMENTARY_CHARGE/SRGRZ_ELECTRON_MASS, bmag = 1.0, impact_angle = 0.0;\n'
-        f'    double mu_ref = temperature / bmag;\n'
         f'    double out[{out_dim}];\n\n'
         f'    if (argc < 2) {{\n'
         f'        fprintf(stderr, "Usage: %s {{predict|eval|physical|physical_vcut_fact}} [args...]\\n", argv[0]);\n'
