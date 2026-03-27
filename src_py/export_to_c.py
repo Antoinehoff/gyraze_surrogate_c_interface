@@ -476,11 +476,9 @@ def generate_c_code(
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
-            f"    if (phinorm > 0.05) {{\n"
+            f"    if (phinorm > 0.05 && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
             f"      {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
             
-            f"      double vcut_const_sq = -q2Dm * (phi - phi_wall);\n"
-            f"      double vte_sq = temperature / {cons_prefix}_ELECTRON_MASS;\n"
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
@@ -506,9 +504,7 @@ def generate_c_code(
             f"      }}\n"
             
             f"      {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
-            
-            f"      double vcut_const_sq = -q2Dm * (phi - phi_wall);\n"
-            f"      double vte_sq = temperature / {cons_prefix}_ELECTRON_MASS;\n"
+                        
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
