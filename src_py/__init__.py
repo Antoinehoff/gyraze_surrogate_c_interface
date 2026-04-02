@@ -14,11 +14,13 @@ Individual modules can still be imported directly:
 
 from .gyraze_surrogate import surrogate_model, muvec
 from .surrogate_proj import surrogate_model as surrogate_model_proj
+from .surrogate_proj import svm_predict
 from .export_to_c import generate_c_code
 
 __all__ = [
     "surrogate_model",
     "surrogate_model_proj",
+    "svm_predict",
     "muvec",
     "generate_c_code",
 ]

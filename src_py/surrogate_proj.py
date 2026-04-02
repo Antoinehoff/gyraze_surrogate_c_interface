@@ -75,6 +75,11 @@ def find_nearest(clf, x0, lam=1e-3, bounds=None, tol=1e-6, maxiter=500):
         return None, res
     return res.x, res
 
+def svm_predict(alpha: float, gamma: float, phi: float):
+    """Predict SVM class for given (α, γ, φ)."""
+    params = [alpha, gamma, phi]
+    return clf.predict([params])[0]
+
 # ============================================================
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================

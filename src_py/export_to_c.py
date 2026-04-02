@@ -200,7 +200,6 @@ def generate_c_code(
             header_head = (
                 f"#ifndef {output_name.upper()}_H\n"
                 f"#define {output_name.upper()}_H\n\n"
-                f"#include <math.h>\n"
                 f"#include <stdlib.h>\n"
                 f"#include <stddef.h>\n\n"
                 f"#include <stdio.h>\n\n"
@@ -223,7 +222,6 @@ def generate_c_code(
             cons_prefix = "GKYL"
             header_head = (
                 f"#pragma once\n\n"
-                f"#include <math.h>\n"
                 f"#include <gkyl_const.h>\n"
                 f"#include <gkyl_util.h>\n\n"
             )
@@ -258,7 +256,8 @@ def generate_c_code(
             f"/*\n"
             f" * {c_fname}  –  GYRAZE surrogate model generated from {REPO_INFO}\n"
             f" */\n"
-            f'#include "{h_fname}"\n\n'
+            f'#include "{h_fname}"\n'
+            f"#include <math.h>\n\n"
             + struct_instances +
             f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
             f"{{\n"
@@ -444,32 +443,51 @@ def generate_c_code(
             f"    return converged;\n"
             f"}}\n\n"
 
-            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out)\n"
+            f"{cu_flag}void {func_prefix}_eval_norm(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out)\n"
             f"{{\n"
             f"    double vcut[SRGRZ_N_MU];\n"
             f"    {func_prefix}_predict(alpha, gamma, phi, vcut);\n"
             f"    {func_prefix}_interp(vcut, mu_new, n, mu_ref, out);\n"
             f"}}\n\n"
 
-            f"{cu_flag}void {func_prefix}_proj_eval(const double *mu_new, int n, double mu_ref,\n"
+            f"{cu_flag}void {func_prefix}_proj_eval_norm(const double *mu_new, int n, double mu_ref,\n"
             f"    double alpha, double gamma, double phi, double *out)\n"
             f"{{\n"
             f"    double xp[3];\n"
             f"    {func_prefix}_project(alpha, gamma, phi, &xp[0], &xp[1], &xp[2]);\n"
-            f"    {func_prefix}_eval(mu_new, n, mu_ref, xp[0], xp[1], xp[2], out);\n"
+            f"    {func_prefix}_eval_norm(mu_new, n, mu_ref, xp[0], xp[1], xp[2], out);\n"
             f"}}\n\n"
 
-            f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
+            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
             f"    double temperature, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
             f"    double muref = temperature / bmag;\n"
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
-            f"    {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
+            f"    if (phinorm > 0.05) {{\n"
+            f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
+            f"    }} else {{\n"
+            f"      for (int i = 0; i < n; i++)\n"
+            f"        out[i] = 1.0;\n"
+            f"    }}\n"
             f"}}\n"
         
-            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
+            f"{{\n"
+            f"    double muref = temperature / bmag;\n"
+            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
+            f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
+            
+            f"    {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            
+            f"    for (int i = 0; i < n; i++)\n"
+            f"      out[i] = pow(out[i],2) / (2*phinorm);\n"
+            f"}}\n"
+            
+            f"{cu_flag}void {func_prefix}_conv_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
             f"    double muref = temperature / bmag;\n"
@@ -477,7 +495,7 @@ def generate_c_code(
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
             f"    if (phinorm > 0.05 && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
-            f"      {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
             
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
@@ -487,7 +505,7 @@ def generate_c_code(
             f"    }}\n"
             f"}}\n"
             
-            f"{cu_flag}void {func_prefix}_eval_proj_physical_vcut_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_proj_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
             f"    double gamma = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
@@ -503,7 +521,7 @@ def generate_c_code(
             f"        phinorm = xp[2];\n"
             f"      }}\n"
             
-            f"      {func_prefix}_eval(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
                         
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
@@ -516,7 +534,7 @@ def generate_c_code(
 
         # ── Assemble .h ───────────────────────────────────────────────────────────               
         h_source = (
-            f"/* {h_fname}  –  GYRAZE surrogate model public API generated from {REPO_INFO} */\n"
+            f"/* {h_fname}  -  GYRAZE surrogate model public API generated from {REPO_INFO} */\n"
             
             f"{header_head}"
             
@@ -580,7 +598,7 @@ def generate_c_code(
             f"                             double *alpha_proj, double *gamma_proj, double *phi_proj);\n\n"
             
             f"/**\n"
-            f" * Returns the prediction of a custom mu grid of size n\n"
+            f" * Returns the prediction of a custom mu grid of size n taking normalized input.\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
@@ -590,10 +608,10 @@ def generate_c_code(
             f" * @param phi:     normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out);\n\n"
+            f"{cu_flag}void {func_prefix}_eval_norm(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out);\n\n"
 
             f"/**\n"
-            f" * Like {func_prefix}_eval, but projects (alpha, gamma, phi) onto the nearest\n"
+            f" * Like {func_prefix}_eval_norm, but projects (alpha, gamma, phi) onto the nearest\n"
             f" * convergent point in parameter space when GYRAZE is predicted not to converge.\n"
             f" * The projection minimises svm_score(x)^2 + 1e-3*||x-x0||^2 via gradient\n"
             f" * descent with Armijo backtracking (mirrors find_nearest() in surrogate_proj.py).\n"
@@ -606,11 +624,11 @@ def generate_c_code(
             f" * @param phi:     normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_proj_eval(const double *mu_new, int n, double mu_ref,\n"
+            f"{cu_flag}void {func_prefix}_proj_eval_norm(const double *mu_new, int n, double mu_ref,\n"
             f"    double alpha, double gamma, double phi, double *out);\n\n"
 
             f"/**\n"
-            f" * Converts from physical parameters and evaluates on a custom mu grid.\n"
+            f" * Same as {func_prefix}_eval_norm, but uses physical parameters and evaluates on a custom mu grid.\n"
             f" * Conversion formulas:\n"
             f" *   munorm  = mu*Bmag / temperature\n"
             f" *   gamma   = (1/Bmag) * sqrt(m_e * density / eps0)\n"
@@ -625,11 +643,11 @@ def generate_c_code(
             f" * @param bmag:    magnetic field strength (T)\n"
             f" * @param impact_angle: magnetic impact angle (radians)\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_eval_physical(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double bmag, double impact_angle, double *out);\n\n"
             
             f"/**\n"
-            f" * Same as {func_prefix}_eval_physical, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
+            f" * Same as {func_prefix}_eval, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
@@ -641,11 +659,11 @@ def generate_c_code(
             f" * @param bmag:    magnetic field strength (T)\n"
             f" * @param impact_angle: magnetic impact angle (radians)\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_eval_physical_vcut_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
             
             f"/**\n"
-            f" * Same as srgrz_eval_physical_vcut_fact, but normalises return 0 if gyraze is not converging.\n"
+            f" * Same as {func_prefix}_eval, but normalises return 0 if gyraze is not converging.\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
@@ -657,7 +675,23 @@ def generate_c_code(
             f" * @param bmag:    magnetic field strength (T)\n"
             f" * @param impact_angle: magnetic impact angle (radians)\n"
             f" */\n"
-            f"{cu_flag}void {func_prefix}_eval_proj_physical_vcut_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"{cu_flag}void {func_prefix}_conv_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
+            
+            f"/**\n"
+            f" * Same as {func_prefix}_eval_fact, but normalises return 0 if gyraze is not converging.\n"
+            f" *\n"
+            f" * @param mu_new:  input array of size n containing the new mu points\n"
+            f" * @param n:       number of points in mu_new and out\n"
+            f" * @param phi:     sheath potential (V)\n"
+            f" * @param phi_wall: wall potential (V)\n"
+            f" * @param density:  electron density (m^-3)\n"
+            f" * @param temperature:  electron temperature (eV)\n"
+            f" * @param q2Dm:     2 x charge-to-mass ratio (C/kg)\n"
+            f" * @param bmag:    magnetic field strength (T)\n"
+            f" * @param impact_angle: magnetic impact angle (radians)\n"
+            f" */\n"
+            f"{cu_flag}void {func_prefix}_proj_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
             f"{header_tail}"
         )
@@ -707,18 +741,16 @@ def generate_c_code(
         f'        srgrz_predict(alpha, gamma, phi, out);\n\n'
         f'        for (int i = 0; i < {out_dim}; i++)\n'
         f'            printf("out[%2d] = %.6f\\n", i, out[i]);\n\n'
-        f'    }}\n'
-        f'    else if (strcmp(argv[1], "eval") == 0) {{\n'
+        f'    }} else if (strcmp(argv[1], "eval") == 0) {{\n'
         f'        double result;\n\n'
         f'        /* Parse arguments */\n'
         f'        if (argc > 2) mu = atof(argv[2]);\n'
         f'        if (argc > 3) alpha = atof(argv[3]);\n'
         f'        if (argc > 4) gamma = atof(argv[4]);\n'
         f'        if (argc > 5) phi = atof(argv[5]);\n\n'
-        f'        srgrz_eval(&mu, 1, 1.0, alpha, gamma, phi, &result);\n\n'
+        f'        srgrz_eval_norm(&mu, 1, 1.0, alpha, gamma, phi, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
-        f'    }}\n'
-        f'    else if (strcmp(argv[1], "physical") == 0) {{\n'
+        f'    }} else if (strcmp(argv[1], "physical") == 0) {{\n'
         f'        double result;\n\n'
         f'        /* Parse arguments */\n'
         f'        if (argc > 2) mu = atof(argv[2]);\n'
@@ -728,10 +760,9 @@ def generate_c_code(
         f'        if (argc > 6) temperature = atof(argv[6]);\n'
         f'        if (argc > 7) bmag = atof(argv[7]);\n'
         f'        if (argc > 8) impact_angle = atof(argv[8]);\n\n'
-        f'        srgrz_eval_physical(&mu, 1, phi, phi_wall, density, temperature, bmag, impact_angle, &result);\n\n'
+        f'        srgrz_eval(&mu, 1, phi, phi_wall, density, temperature, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
-        f'    }}\n'
-        f'    else if (strcmp(argv[1], "physical_vcut_fact") == 0) {{\n'
+        f'    }} else if (strcmp(argv[1], "physical_vcut_fact") == 0) {{\n'
         f'        double result;\n\n'
         f'        /* Parse arguments */\n'
         f'        if (argc > 2) mu = atof(argv[2]);\n'
@@ -742,7 +773,20 @@ def generate_c_code(
         f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
         f'        if (argc > 8) bmag = atof(argv[8]);\n'
         f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
-        f'        srgrz_eval_physical_vcut_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
+        f'        srgrz_eval_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
+        f'        printf("out = %.6f\\n", result);\n\n'
+        f'    }} else if (strcmp(argv[1], "conv_physical_vcut_fact") == 0) {{\n'
+        f'        double result;\n\n'
+        f'        /* Parse arguments */\n'
+        f'        if (argc > 2) mu = atof(argv[2]);\n'
+        f'        if (argc > 3) phi = atof(argv[3]);\n'
+        f'        if (argc > 4) phi_wall = atof(argv[4]);\n'
+        f'        if (argc > 5) density = atof(argv[5]);\n'
+        f'        if (argc > 6) temperature = atof(argv[6]);\n'
+        f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
+        f'        if (argc > 8) bmag = atof(argv[8]);\n'
+        f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
+        f'        srgrz_conv_eval_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
         f'    }} else if (strcmp(argv[1], "proj_physical_vcut_fact") == 0) {{\n'
         f'        double result;\n\n'
@@ -755,11 +799,11 @@ def generate_c_code(
         f'        if (argc > 7) q2Dm = atof(argv[7]);\n'
         f'        if (argc > 8) bmag = atof(argv[8]);\n'
         f'        if (argc > 9) impact_angle = atof(argv[9]);\n\n'
-        f'        srgrz_eval_proj_physical_vcut_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
+        f'        srgrz_proj_eval_fact(&mu, 1, phi, phi_wall, density, temperature, q2Dm, bmag, impact_angle, &result);\n\n'
         f'        printf("out = %.6f\\n", result);\n\n'
         f'    }} else {{\n'
         f'        fprintf(stderr, "Unknown mode: %s\\n", argv[1]);\n'
-        f'        fprintf(stderr, "Use \'predict\', \'eval\', \'physical\', \'physical_vcut_fact\', or \'proj_physical_vcut_fact\'\\n");\n'
+        f'        fprintf(stderr, "Use \'predict\', \'eval\', \'physical\', \'physical_vcut_fact\', \'conv_physical_vcut_fact\', or \'proj_physical_vcut_fact\'\\n");\n'
         f'        return 1;\n'
         f'    }}\n\n'
         f'    return 0;\n'
