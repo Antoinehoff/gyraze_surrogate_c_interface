@@ -22,3 +22,4 @@ generated_c_code
 *.swp
 *.swo
 *.DS_Store
+*.h5
