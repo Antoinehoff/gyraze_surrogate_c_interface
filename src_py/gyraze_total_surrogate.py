@@ -73,7 +73,7 @@ vvec = np.array([
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(alpha: float, gamma: float, phi: float):
+def surrogate_model(mu: float, alpha: float, gamma: float, phi: float):
     params = [alpha, gamma, phi]
     x_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
     y_pred_class = clf.predict([params])[0]
@@ -81,23 +81,24 @@ def surrogate_model(alpha: float, gamma: float, phi: float):
     with torch.no_grad():
         if y_pred_class == 0:
             #Did not converge — use projection model
-            print(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
+            #print(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
             Y_pred = projmodel(normX(x_tensor, X_mu2, X_sigma2))
             Y_pred_denorm = denormy(Y_pred, Y_mu2, Y_sigma2).cpu().numpy().flatten()
         else:
             #Converged — use base model
-            print(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
+            #print(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
             Y_pred = model(normX(x_tensor, X_mu, X_sigma))
             Y_pred_denorm = denormy(Y_pred, Y_mu, Y_sigma).cpu().numpy().flatten()
             
+    interp = np.interp(mu, vvec, Y_pred_denorm)
      # --- Plot ---
-    plt.figure(figsize=(8, 4))
-    plt.plot(vvec, Y_pred_denorm, 'o-', label='NN prediction')
-    plt.xlabel("v")
-    plt.ylabel("Predicted value")
-    plt.title(f"Predicted profile for α={alpha}, γ={gamma}, φ={phi}")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+    #plt.figure(figsize=(8, 4))
+    #plt.plot(vvec, Y_pred_denorm, 'o-', label='NN prediction')
+    #plt.xlabel("v")
+    #plt.ylabel("Predicted value")
+    #plt.title(f"Predicted profile for α={alpha}, γ={gamma}, φ={phi}")
+    #plt.legend()
+    #plt.grid(True)
+    #plt.show()
     
-    return Y_pred_denorm
+    return interp
