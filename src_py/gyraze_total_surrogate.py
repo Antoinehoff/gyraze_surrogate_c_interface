@@ -16,6 +16,9 @@ from torch import nn
 import numpy as np
 import joblib
 import matplotlib.pyplot as plt
+import os
+
+_MODEL_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "model"))
 
 class NeuralNetwork(nn.Module):
     def __init__(self, input_dim=3, output_dim=20, width=75, depth=3, activation='silu'):
@@ -38,24 +41,24 @@ class NeuralNetwork(nn.Module):
         return self.net(x)
 
 #Load pretrained models
-clf = joblib.load("svm_model.pkl")
+clf = joblib.load(os.path.join(_MODEL_DIR, "svm_model.pkl"))
 
 #Base model (trained on GYRAZE DATA)
 model = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-model.load_state_dict(torch.load("nn_model.pth", map_location='cpu'))
+model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model.pth"), map_location='cpu'))
 model.eval()
 
 #Projection model (trained on Base model data of boundary "projected" points)
 projmodel = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-projmodel.load_state_dict(torch.load("nn_model2.pth", map_location='cpu')) 
+projmodel.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model_total.pth"), map_location='cpu')) 
 projmodel.eval()
 
 # Load normalization parameters
-norms = np.load("normalization.npz")
+norms = np.load(os.path.join(_MODEL_DIR, "normalization.npz"))
 X_mu, X_sigma = torch.tensor(norms["X_mu"]), torch.tensor(norms["X_sigma"])
 Y_mu, Y_sigma = torch.tensor(norms["Y_mu"]), torch.tensor(norms["Y_sigma"])
 
-norms2 = np.load("normalization2.npz")
+norms2 = np.load(os.path.join(_MODEL_DIR, "normalization_total.npz"))
 X_mu2, X_sigma2 = torch.tensor(norms2["X_mu"]), torch.tensor(norms2["X_sigma"])
 Y_mu2, Y_sigma2 = torch.tensor(norms2["Y_mu"]), torch.tensor(norms2["Y_sigma"])
 
