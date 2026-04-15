@@ -44,21 +44,21 @@ class NeuralNetwork(nn.Module):
 clf = joblib.load(os.path.join(_MODEL_DIR, "svm_model.pkl"))
 
 #Base model (trained on GYRAZE DATA)
-model = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model.pth"), map_location='cpu'))
-model.eval()
+convmodel = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
+convmodel.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model_conv.pth"), map_location='cpu'))
+convmodel.eval()
 
 #Projection model (trained on Base model data of boundary "projected" points)
-projmodel = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-projmodel.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model_total.pth"), map_location='cpu')) 
-projmodel.eval()
+unconvmodel = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
+unconvmodel.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model_unconv.pth"), map_location='cpu')) 
+unconvmodel.eval()
 
 # Load normalization parameters
-norms = np.load(os.path.join(_MODEL_DIR, "normalization.npz"))
+norms = np.load(os.path.join(_MODEL_DIR, "normalization_conv.npz"))
 X_mu, X_sigma = torch.tensor(norms["X_mu"]), torch.tensor(norms["X_sigma"])
 Y_mu, Y_sigma = torch.tensor(norms["Y_mu"]), torch.tensor(norms["Y_sigma"])
 
-norms2 = np.load(os.path.join(_MODEL_DIR, "normalization_total.npz"))
+norms2 = np.load(os.path.join(_MODEL_DIR, "normalization_unconv.npz"))
 X_mu2, X_sigma2 = torch.tensor(norms2["X_mu"]), torch.tensor(norms2["X_sigma"])
 Y_mu2, Y_sigma2 = torch.tensor(norms2["Y_mu"]), torch.tensor(norms2["Y_sigma"])
 
@@ -76,32 +76,27 @@ vvec = np.array([
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(mu: float, alpha: float, gamma: float, phi: float):
+def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, msg: list = []):
+    """
+    Two NN models:
+    1. Vanilla model trained on the convergent GYRAZE cases ONLY, using the original parameters.
+    2. Model trained on the projected unconverged GYRAZE cases ONLY, using the projected parameters.
+    The function checks the SVM prediction for convergence and uses the appropriate model
+    """
     params = [alpha, gamma, phi]
     x_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
     y_pred_class = clf.predict([params])[0]
 
     with torch.no_grad():
         if y_pred_class == 0:
-            #Did not converge — use projection model
-            #print(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}")
-            Y_pred = projmodel(normX(x_tensor, X_mu2, X_sigma2))
+            msg.append(f"GYRAZE did not converge for α={alpha}, γ={gamma}, φ={phi}, using unconverged model")
+            Y_pred = unconvmodel(normX(x_tensor, X_mu2, X_sigma2))
             Y_pred_denorm = denormy(Y_pred, Y_mu2, Y_sigma2).cpu().numpy().flatten()
         else:
-            #Converged — use base model
-            #print(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}")
-            Y_pred = model(normX(x_tensor, X_mu, X_sigma))
+            msg.append(f"GYRAZE converged for α={alpha}, γ={gamma}, φ={phi}, using converged model")
+            Y_pred = convmodel(normX(x_tensor, X_mu, X_sigma))
             Y_pred_denorm = denormy(Y_pred, Y_mu, Y_sigma).cpu().numpy().flatten()
             
     interp = np.interp(mu, vvec, Y_pred_denorm)
-     # --- Plot ---
-    #plt.figure(figsize=(8, 4))
-    #plt.plot(vvec, Y_pred_denorm, 'o-', label='NN prediction')
-    #plt.xlabel("v")
-    #plt.ylabel("Predicted value")
-    #plt.title(f"Predicted profile for α={alpha}, γ={gamma}, φ={phi}")
-    #plt.legend()
-    #plt.grid(True)
-    #plt.show()
     
     return interp

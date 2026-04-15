@@ -44,11 +44,11 @@ class NeuralNetwork(nn.Module):
 clf = joblib.load(os.path.join(_MODEL_DIR, "svm_model.pkl"))
 
 model = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model.pth"), map_location='cpu'))
+model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model_conv.pth"), map_location='cpu'))
 model.eval()
 
 # Load normalization parameters
-norms = np.load(os.path.join(_MODEL_DIR, "normalization.npz"))
+norms = np.load(os.path.join(_MODEL_DIR, "normalization_conv.npz"))
 X_mu, X_sigma = torch.tensor(norms["X_mu"]), torch.tensor(norms["X_sigma"])
 Y_mu, Y_sigma = torch.tensor(norms["Y_mu"]), torch.tensor(norms["Y_sigma"])
 
@@ -66,9 +66,11 @@ muvec = np.array([
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = False,
-                    msg: list = []):
-    """Evaluate SVM convergence and NN prediction for given (α, γ, φ)."""
+def surrogate_model(alpha: float, gamma: float, phi: float, msg: list = []):
+    """
+    NN model of GYRAZE trained on convergent cases.
+    This is the vanilla model. We use here the SVM classifier just to check if the point would converge but no projection.
+    """
     params = [alpha, gamma, phi]
 
     # --- SVM classification ---
@@ -84,16 +86,5 @@ def surrogate_model(alpha: float, gamma: float, phi: float, show_fig: bool = Fal
         x_tensor = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
         Y_pred = model(normX(x_tensor))
         Y_pred_denorm = denormy(Y_pred).cpu().numpy().flatten()
-
-    # --- Plot ---
-    if show_fig:
-        plt.figure(figsize=(3, 4))
-        plt.plot(Y_pred_denorm, muvec, '.-')
-        plt.title(r"Predicted profile"+ "\n" + r"($\alpha={alpha}$, $\gamma={gamma}$, $\phi={phi}$)".format(alpha=alpha, gamma=gamma, phi=phi))
-        plt.xlabel(r"$v_{\parallel}/v_{th}$")
-        plt.ylabel(r"$\mu B/T$")
-        plt.xlim(0, 2)
-        plt.grid(True)
-        plt.show()
 
     return Y_pred_denorm

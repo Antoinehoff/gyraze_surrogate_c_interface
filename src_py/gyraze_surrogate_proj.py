@@ -45,11 +45,11 @@ class NeuralNetwork(nn.Module):
 clf = joblib.load(os.path.join(_MODEL_DIR, "svm_model.pkl"))
 
 model = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model.pth"), map_location='cpu'))
+model.load_state_dict(torch.load(os.path.join(_MODEL_DIR, "nn_model_conv.pth"), map_location='cpu'))
 model.eval()
 
 # Load normalization parameters
-norms = np.load(os.path.join(_MODEL_DIR, "normalization.npz"))
+norms = np.load(os.path.join(_MODEL_DIR, "normalization_conv.npz"))
 X_mu, X_sigma = torch.tensor(norms["X_mu"]), torch.tensor(norms["X_sigma"])
 Y_mu, Y_sigma = torch.tensor(norms["Y_mu"]), torch.tensor(norms["Y_sigma"])
 
@@ -84,9 +84,11 @@ def svm_predict(alpha: float, gamma: float, phi: float):
 #  FUNCTION TO EVALUATE THE SURROGATE
 # ============================================================
 
-def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, show_fig: bool = False,
-                    msg: list = []):
-    """Evaluate SVM convergence and NN prediction for given (α, γ, φ)."""
+def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, msg: list = []):
+    """
+    NN model trained on GYRAZE convergent cases. 
+    A python wrapper projects the parameters to the nearest convergent point if the SVM predicts non-convergence, and evaluates the NN there.
+    """
     params = [alpha, gamma, phi]
 
     # --- SVM classification ---
@@ -110,16 +112,5 @@ def surrogate_model(mu: float, alpha: float, gamma: float, phi: float, show_fig:
         Y_pred_denorm = denormy(Y_pred).cpu().numpy().flatten()
         
     interp = np.interp(mu, muvec, Y_pred_denorm)
-    
-    # --- Plot ---
-    if show_fig:
-        plt.figure(figsize=(3.5,5))
-        plt.plot(Y_pred_denorm, muvec, '.-')
-        plt.title(r"Predicted profile"+ "\n" + r"($\alpha={alpha}$, $\gamma={gamma}$, $\phi={phi}$)".format(alpha=alpha, gamma=gamma, phi=phi))
-        plt.xlabel(r"$v_{\parallel}/v_{th}$")
-        plt.ylabel(r"$\mu B/T$")
-        plt.xlim(0, 1.1*max(Y_pred_denorm))
-        plt.grid(True)
-        plt.show()
         
     return interp

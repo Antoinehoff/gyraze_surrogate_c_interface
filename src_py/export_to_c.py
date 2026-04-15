@@ -108,10 +108,13 @@ def _c_struct_fields(linear_layers, Y_mu, Y_sigma, mu_grid):
 
 def generate_c_code(
     nn_model: str      = os.path.join(_ROOT, "model", "nn_model.pth"),
-    svm_model: str     = os.path.join(_ROOT, "model", "svm_model.pkl"),
     normalization: str = os.path.join(_ROOT, "model", "normalization.npz"),
+    svm_model: str     = os.path.join(_ROOT, "model", "svm_model.pkl"),
     output_dir: str    = os.path.join(_ROOT, "generated_c_code"),
     output_name: str   = "surrogate",
+    # Optional inputs
+    normalization_total: str = None,
+    nn_total_model: str = None,
     gkeyll_dir: str    = None,
 ):
     """
@@ -125,67 +128,66 @@ def generate_c_code(
     output_dir    : directory where output files are written (default: '.')
     output_name   : base name for output files (default: 'surrogate')
                     produces <output_dir>/<output_name>.c and .h
+    normalization_total : (optional) path to the normalisation arrays for the "total surrogate" variant (.npz)
+    nn_total_model : (optional) path to the PyTorch weights file for the "total surrogate" variant (.pth)
     gkeyll_dir    : directory for the Gkeyll kernel files (default: same as output_dir)
                     produces gk_gyraze_surrogate.c and gkyl_gk_gyraze_surrogate.h
     """
     # ── Mu-grid ───────────────────────────────────────────────────────────────
     try:
-        from .gyraze_surrogate import muvec as _muvec
+        from .gyraze_conv_surrogate import muvec as _muvec
     except ImportError:
-        from gyraze_surrogate import muvec as _muvec
+        from src_py.gyraze_conv_surrogate import muvec as _muvec
     mu_grid = _muvec.tolist()
     n_mu = len(mu_grid)
-    
-    # ── Load models ───────────────────────────────────────────────────────────
-    clf = joblib.load(svm_model)
 
-    model = NeuralNetwork(input_dim=3, output_dim=20, width=75, depth=3, activation='silu')
-    model.load_state_dict(torch.load(nn_model, map_location='cpu'))
-    model.eval()
+    # ── Load NN(s) via nnToC ─────────────────────────────────────────────────
+    try:
+        from .nn_to_c import nnToC
+    except ImportError:
+        from nn_to_c import nnToC
 
-    norms   = np.load(normalization)
-    X_mu    = norms["X_mu"].tolist()
-    X_sigma = norms["X_sigma"].tolist()
-    Y_mu    = norms["Y_mu"].tolist()
-    Y_sigma = norms["Y_sigma"].tolist()
-
-    # ── Extract NN weights ────────────────────────────────────────────────────
-    linear_layers = [m for m in model.net if isinstance(m, nn.Linear)]
-    layer_dims    = [(l.in_features, l.out_features) for l in linear_layers]
-    n_layers      = len(linear_layers)
-
-    struct_fields = _c_struct_fields(linear_layers, Y_mu, Y_sigma, mu_grid)
-
-    # ── Build NN forward-pass C code ──────────────────────────────────────────
-    buf_decls = "    double h0[3];\n"
-    for i, (_, out_d) in enumerate(layer_dims):
-        buf_decls += f"    double h{i+1}[{out_d}];\n"
-
-    norm_code = "    /* input normalisation */\n"
-    for k in range(3):
-        norm_code += f"    h0[{k}] = (x[{k}] - {X_mu[k]:.8f}f) / {X_sigma[k]:.8f}f;\n"
-
-    layer_code = ""
-    for i, (in_d, out_d) in enumerate(layer_dims):
-        layer_code += _dense_layer_c(i, in_d, out_d, "silu" if i < n_layers - 1 else None)
-
-    out_dim     = layer_dims[-1][1]
-    denorm_code = (
-        "    /* output denormalisation */\n"
-        f"    for (int _j = 0; _j < {out_dim}; _j++)\n"
-        f"        out[_j] = h{n_layers}[_j] * w->Y_sigma[_j] + w->Y_mu[_j];\n"
+    nn_base = nnToC(
+        nn_model_path      = nn_model,
+        normalization_path = normalization,
+        mu_grid            = mu_grid,
+        struct_type_name   = "srgrz_weights_t",
+        weights_var_name   = "srgrz_weights",
     )
-    filter_negative_code = (
-        "    /* enforce non-negativity of the output (physically vcut cannot be negative) */\n"
-        f"    for (int _j = 0; _j < {out_dim}; _j++)\n"
-        f"        if (out[_j] < 0.0f) out[_j] = 0.0f;\n"
-    )
+
+    has_total = (nn_total_model is not None and normalization_total is not None)
+    if has_total:
+        nn_total = nnToC(
+            nn_model_path      = nn_total_model,
+            normalization_path = normalization_total,
+            mu_grid            = mu_grid,
+            struct_type_name   = "srgrz_unconv_weights_t",
+            weights_var_name   = "srgrz_unconv_weights",
+        )
+
+    # Convenience aliases (used unchanged further below)
+    out_dim    = nn_base.out_dim
+    layer_dims = nn_base.layer_dims
+    n_layers   = nn_base.n_layers
 
     # ── SVM via m2cgen ────────────────────────────────────────────────────────
-    svm_c_code = m2c.export_to_c(clf)
+    svm = joblib.load(svm_model)
+    svm_c_code = m2c.export_to_c(svm)
     svm_c_code = svm_c_code.replace("double score(", "double svm_score(")
-    # remove redundent "#include <math.h>" from svm_c_code since it's already included in the header
     svm_c_code = svm_c_code.replace("#include <math.h>\n", "")
+
+    # ── Relative paths for the header comment ─────────────────────────────────
+    _rel = lambda p: os.path.join(os.path.basename(_ROOT), os.path.relpath(os.path.abspath(p), _ROOT))
+    _sources_comment = (
+        f" *   nn model      : {_rel(nn_model)}\n"
+        f" *   normalization : {_rel(normalization)}\n"
+        f" *   svm model     : {_rel(svm_model)}\n"
+    )
+    if has_total:
+        _sources_comment += (
+            f" *   nn total      : {_rel(nn_total_model)}\n"
+            f" *   norm total    : {_rel(normalization_total)}\n"
+        )
 
     # -- Generate both a test version and a Gkeyll-compatible version of the C code --        
     for code_gen in ['test','gkyl']:
@@ -227,50 +229,63 @@ def generate_c_code(
             )
             header_tail = f"EXTERN_C_END\n\n"
             extern_c_beg = "EXTERN_C_BEG\n\n"
-        type_name = "srgrz_weights_t"
-        inst_name = "srgrz_w"
-        struct_def = _c_struct_def(layer_dims, out_dim, n_mu, type_name)
-        if code_gen == 'gkyl':
-            struct_instances = (
-                f"/* host copy – visible in the __host__ pass */\n"
-                f"static const {type_name} {inst_name}_h = {{\n{struct_fields}\n}};\n\n"
-                f"/* device copy – visible in the __device__ pass */\n"
-                f"#ifdef GKYL_HAVE_CUDA\n"
-                f"__device__ static const {type_name} {inst_name}_d = {{\n{struct_fields}\n}};\n"
-                f"#endif\n\n"
-                f"/* Select the right copy based on compilation context */\n"
-                f"#ifdef __CUDA_ARCH__\n"
-                f"#  define SRGRZ_WEIGHTS {inst_name}_d\n"
-                f"#else\n"
-                f"#  define SRGRZ_WEIGHTS {inst_name}_h\n"
-                f"#endif\n\n"
+        struct_def = nn_base.struct_def
+        gkyl_flag  = (code_gen == "gkyl")
+        struct_instances = nn_base.struct_instances_c(for_gkyl=gkyl_flag)
+
+        if has_total:
+            struct_def       += nn_total.struct_def
+            struct_instances += nn_total.struct_instances_c(for_gkyl=gkyl_flag)
+
+        # ── predict function body (base NN) ───────────────────────────────────
+        base_body = (
+            # f"    const {nn_base.struct_type_name} *{nn_base.weights_var_name} = &{nn_base.weights_var_name.upper()};\n"
+            # f"    double x[3] = {{alpha, gamma, phi}};\n"
+            # + 
+            nn_base.predict_body_c()
+        )
+
+        # ── srgrz_predict: base only, or SVM-routed total ─────────────────────
+        if has_total:
+            total_body = (
+                f"    const {nn_total.struct_type_name} *{nn_total.weights_var_name} = &{nn_total.weights_var_name.upper()};\n"
+                f"    double x[3] = {{alpha, gamma, phi}};\n"
+                + nn_total.predict_body_c()
+            )
+            predict_fn = (
+                f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
+                f"{{\n"
+                f"    /* Route: converged → base NN, non-converged → total (projection) NN.\n"
+                f"     * Mirrors gyraze_total_surrogate.py surrogate_model(). */\n"
+                f"    if ({func_prefix}_converged(alpha, gamma, phi)) {{\n"
+                f"        /* --- base NN --- */\n"
+                + "\n".join("        " + l for l in base_body.splitlines()) + "\n"
+                f"    }} else {{\n"
+                f"        /* --- total (projection) NN --- */\n"
+                + "\n".join("        " + l for l in total_body.splitlines()) + "\n"
+                f"    }}\n"
+                f"}}\n\n"
             )
         else:
-            struct_instances = (
-                f"/* host copy */\n"
-                f"static const {type_name} {inst_name}_h = {{\n{struct_fields}\n}};\n"
-                f"#define SRGRZ_WEIGHTS {inst_name}_h\n\n"
+            predict_fn = (
+                f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
+                f"{{\n"
+                + base_body +
+                f"}}\n\n"
             )
         # ── Assemble .c ───────────────────────────────────────────────────────────
         c_source = (
             f"/*\n"
             f" * {c_fname}  –  GYRAZE surrogate model generated from {REPO_INFO}\n"
+            f" * Sources:\n"
+            + _sources_comment +
             f" */\n"
             f'#include "{h_fname}"\n'
             f"#include <math.h>\n\n"
-            + struct_instances +
-            f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[{out_dim}])\n"
-            f"{{\n"
-            f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
-            f"    double x[3] = {{alpha, gamma, phi}};\n"
-            f"{buf_decls}\n"
-            f"{norm_code}\n"
-            f"{layer_code}\n"
-            f"{denorm_code}"
-            f"{filter_negative_code}"
-            f"}}\n\n"
+            + struct_instances
+            + predict_fn
             + cu_flag + svm_c_code + "\n"
-            
+
             f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi)\n"
             "{\n"
             f"    double input[3] = {{alpha, gamma, phi}};\n"
@@ -399,7 +414,7 @@ def generate_c_code(
 
             f"{cu_flag}double *{func_prefix}_grid(double *out)\n"
             f"{{\n"
-            f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
+            f"    const {nn_base.struct_type_name} *w = &SRGRZ_WEIGHTS;\n"
             f"    for (int i = 0; i < SRGRZ_N_MU; i++) {{\n"
             f"        out[i] = w->MU_GRID[i];\n"
             f"    }}\n"
@@ -408,7 +423,7 @@ def generate_c_code(
             
             f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out)\n"
             f"{{\n"
-            f"    const {type_name} *w = &SRGRZ_WEIGHTS;\n"
+            f"    const {nn_base.struct_type_name} *w = &SRGRZ_WEIGHTS;\n"
             f"    int ng = SRGRZ_N_MU;\n"
             f"    for (int i = 0; i < n; i++) {{\n"
             f"        double mu = mu_new[i]/mu_ref;\n"
@@ -534,7 +549,11 @@ def generate_c_code(
 
         # ── Assemble .h ───────────────────────────────────────────────────────────               
         h_source = (
-            f"/* {h_fname}  -  GYRAZE surrogate model public API generated from {REPO_INFO} */\n"
+            f"/*\n"
+            f" * {h_fname}  -  GYRAZE surrogate model public API generated from {REPO_INFO}\n"
+            f" * Sources:\n"
+            + _sources_comment +
+            f" */\n"
             
             f"{header_head}"
             
