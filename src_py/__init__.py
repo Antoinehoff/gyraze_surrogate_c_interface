@@ -10,6 +10,8 @@ from .gyraze_conv_unconv_surrogate import surrogate_model as surrogate_conv_unco
 from .gyraze_surrogate_proj import surrogate_model as surrogate_model_proj
 # Surrogate that should be equivalent to the previous one but with the projection done internally by the NN.
 from .gyraze_full_surrogate import surrogate_model as surrogate_full_model
+# Surrogate like above but using the MPE data.
+from .gyraze_full_MPE_surrogate import surrogate_model as surrogate_full_MPE_model
 # SVM classifier for convergence prediction
 from .gyraze_surrogate_proj import svm_predict
 # C code export function
@@ -21,6 +23,7 @@ __all__ = [
     "surrogate_conv_unconv_model",
     "surrogate_model_proj",
     "surrogate_full_model",
+    "surrogate_full_MPE_model",
     "svm_predict",
     "muvec",
     "generate_c_code",
