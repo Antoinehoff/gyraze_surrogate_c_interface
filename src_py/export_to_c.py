@@ -282,6 +282,7 @@ def generate_c_code(
             f" */\n"
             f'#include "{h_fname}"\n'
             f"#include <math.h>\n\n"
+            f"#define {cons_prefix}_PHI_THRESHOLD 2.0\n\n"
             + struct_instances
             + predict_fn
             + cu_flag + svm_c_code + "\n"
@@ -480,7 +481,7 @@ def generate_c_code(
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
-            f"    if (phinorm > 0.05) {{\n"
+            f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD) {{\n"
             f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
             f"    }} else {{\n"
             f"      for (int i = 0; i < n; i++)\n"
@@ -509,7 +510,7 @@ def generate_c_code(
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
-            f"    if (phinorm > 0.05 && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
+            f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
             f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
             
             f"      for (int i = 0; i < n; i++)\n"
@@ -527,7 +528,7 @@ def generate_c_code(
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
             f"    double muref = temperature / bmag;\n\n"
-            f"    if (phinorm > 0.05) {{\n"
+            f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD) {{\n"
             f"      if (!{func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
             f"        double xp[3];\n"
             f"        {func_prefix}_project(alpha, gamma, phinorm, &xp[0], &xp[1], &xp[2]);\n"
