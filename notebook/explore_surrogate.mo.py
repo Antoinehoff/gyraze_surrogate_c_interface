@@ -32,6 +32,7 @@ def _():
     from src_py import surrogate_unconv_model as srg_unconv
     from src_py import surrogate_full_model as srg_full
     from src_py import surrogate_full_MPE_model as srg_full_MPE
+    from src_py import surrogate_conv_MPE_model as srg_conv_MPE
 
     # Low-level NN objects so we can evaluate the network bypassing the SVM
     import torch
@@ -43,18 +44,19 @@ def _():
             x = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
             return denormy(model(normX(x))).cpu().numpy().flatten()
 
-    return np, plt, srg_grid, srg_conv, srg_proj, srg_unconv, srg_full, srg_full_MPE
+    return np, plt, srg_grid, srg_conv, srg_proj, srg_unconv, srg_full, srg_full_MPE, srg_conv_MPE
 
 
 # Checkboxes — defined here, displayed in the header cell below
 @app.cell
 def _(mo):
-    show_conv     = mo.ui.checkbox(label="NN raw", value=True)
-    show_proj     = mo.ui.checkbox(label="NN + projection", value=True)
-    show_unconv   = mo.ui.checkbox(label="Unconv surrogate", value=True)
-    show_full     = mo.ui.checkbox(label="Full surrogate", value=True)
+    show_conv     = mo.ui.checkbox(label="NN raw", value=False)
+    show_proj     = mo.ui.checkbox(label="NN + projection", value=False)
+    show_unconv   = mo.ui.checkbox(label="Unconv surrogate", value=False)
+    show_full     = mo.ui.checkbox(label="Full surrogate", value=False)
     show_full_MPE = mo.ui.checkbox(label="Full MPE surrogate", value=True)
-    return show_conv, show_proj, show_unconv, show_full, show_full_MPE
+    show_conv_MPE = mo.ui.checkbox(label="Conv MPE surrogate", value=True)
+    return show_conv, show_proj, show_unconv, show_full, show_full_MPE, show_conv_MPE
 
 
 # All parameter sliders
@@ -81,8 +83,6 @@ def _(mo):
         | **Unconv surrogate** | Trained on unconverged case that has been projected |
         | **Full surrogate** | Trained everywhere and internalizes projection |
         | **Full MPE surrogate** | Full surrogate trained with mean percentage error loss |
-
-        The vertical dotted line marks $\sqrt{\phi}$, the constant-cutoff reference.
         """
     )
     return
@@ -115,8 +115,9 @@ def _(np, plt, srg_conv, sl_alpha, sl_gamma, sl_phi):
 # Computation: evaluate surrogate and build the plot figure
 @app.cell
 def _(mo, np, plt, sl_alpha, sl_gamma, sl_phi, sl_npts, sl_mumax,
-      show_conv, show_proj, show_unconv, show_full, show_full_MPE,
-      srg_conv, srg_grid, srg_proj, srg_unconv, srg_full, srg_full_MPE):
+      show_conv, show_proj, show_unconv, show_full, show_full_MPE, show_conv_MPE,
+      srg_conv, srg_grid, srg_proj, srg_unconv, srg_full, srg_full_MPE,
+      srg_conv_MPE):
     alpha = sl_alpha.value
     gamma = sl_gamma.value
     phi   = sl_phi.value
@@ -128,8 +129,9 @@ def _(mo, np, plt, sl_alpha, sl_gamma, sl_phi, sl_npts, sl_mumax,
     conv_vcut      = srg_conv(alpha, gamma, phi)
     proj_vcut      = srg_proj(mu_grid, alpha, gamma, phi)
     unconv_vcut    = srg_unconv(mu_grid, alpha, gamma, phi)
-    total_vcut     = srg_full(mu_grid, alpha, gamma, phi)
-    total_MPE_vcut = srg_full_MPE(mu_grid, alpha, gamma, phi)
+    full_vcut     = srg_full(mu_grid, alpha, gamma, phi)
+    full_MPE_vcut = srg_full_MPE(mu_grid, alpha, gamma, phi)
+    conv_MPE_vcut  = srg_conv_MPE(mu_grid, alpha, gamma, phi)
 
     fig, ax = plt.subplots(figsize=(5.0, 3.5))
 
@@ -146,16 +148,20 @@ def _(mo, np, plt, sl_alpha, sl_gamma, sl_phi, sl_npts, sl_mumax,
                 ms=4, label="Unconv. surrogate")
 
     if show_full.value:
-        ax.plot(total_vcut, mu_grid, color="C3", linestyle="-", marker="d",
+        ax.plot(full_vcut, mu_grid, color="C3", linestyle="-", marker="d",
                 ms=5, label="Full surrogate")
 
     if show_full_MPE.value:
-        ax.plot(total_MPE_vcut, mu_grid, color="C4", linestyle="--", marker="s",
+        ax.plot(full_MPE_vcut, mu_grid, color="C4", linestyle="--", marker="s",
                 ms=5, label="Full MPE surrogate")
+
+    if show_conv_MPE.value:
+        ax.plot(conv_MPE_vcut, mu_grid, color="C5", linestyle="-", marker="o",
+                ms=5, label="Conv MPE surrogate")
 
     if phi > 0:
         ax.axvline(np.sqrt(2 * phi), color="k", linestyle=":", lw=1.2,
-                   label=r"$\sqrt{2\phi}$")
+                   label=r"$\sqrt{2\phi} (Gkeyll)$")
 
     ax.set_xlabel(r"$v_{\mathrm{cut}}$")
     ax.set_ylabel(r"$\mu$")
@@ -170,10 +176,10 @@ def _(mo, np, plt, sl_alpha, sl_gamma, sl_phi, sl_npts, sl_mumax,
 # Two-column controls: sliders | curve toggles
 @app.cell
 def _(mo, sl_alpha, sl_gamma, sl_phi, sl_npts, sl_mumax,
-      show_conv, show_proj, show_unconv, show_full, show_full_MPE):
+      show_conv, show_proj, show_unconv, show_full, show_full_MPE, show_conv_MPE):
     _sliders = mo.vstack([sl_alpha, sl_gamma, sl_phi, sl_npts, sl_mumax])
     _toggles = mo.vstack([mo.md("**Show curves:**"),
-                          show_conv, show_proj, show_unconv, show_full, show_full_MPE])
+                          show_conv, show_proj, show_unconv, show_full, show_full_MPE, show_conv_MPE])
     mo.hstack([_sliders, _toggles], justify="start")
     return
 
