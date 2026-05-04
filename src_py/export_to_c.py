@@ -273,8 +273,8 @@ def generate_c_code(
                 + base_body +
                 f"}}\n\n"
             )
-        # ── Assemble .c ───────────────────────────────────────────────────────────
-        c_source = (
+        # ── C function bodies ─────────────────────────────────────────────────────
+        c_file_header = (
             f"/*\n"
             f" * {c_fname}  –  GYRAZE surrogate model generated from {REPO_INFO}\n"
             f" * Sources:\n"
@@ -283,16 +283,17 @@ def generate_c_code(
             f'#include "{h_fname}"\n'
             f"#include <math.h>\n\n"
             f"#define {cons_prefix}_PHI_THRESHOLD 2.0\n\n"
-            + struct_instances
-            + predict_fn
-            + cu_flag + svm_c_code + "\n"
+        )
 
+        converged_fn = (
             f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi)\n"
             "{\n"
             f"    double input[3] = {{alpha, gamma, phi}};\n"
             f"    return (svm_score(input) >= 0.0) ? 1 : 0;\n"
             "}\n\n"
+        )
 
+        svm_grad_fn = (
             f"/* Finite-difference gradient of svm_score(x) */\n"
             f"{cu_flag}static void _srgrz_svm_grad(const double *x, double h, double *g)\n"
             f"{{\n"
@@ -304,7 +305,9 @@ def generate_c_code(
             f"        g[i] = (svm_score(xp) - svm_score(xm)) / (2.0*h);\n"
             f"    }}\n"
             f"}}\n\n"
+        )
 
+        project_internal_fn = (
             f"/* Project x0 onto the convergent region by minimising\n"
             f" * f(x) = svm_score(x)^2 + lam*||x-x0||^2 using L-BFGS\n"
             f" * with Armijo backtracking. Mirrors find_nearest() in surrogate_proj.py.\n"
@@ -412,7 +415,9 @@ def generate_c_code(
             f"    x_out[0]=x[0]; x_out[1]=x[1]; x_out[2]=x[2];\n"
             f"    return (svm_score(x_out) >= 0.0) ? 1 : 0;\n"
             f"}}\n\n"
+        )
 
+        grid_fn = (
             f"{cu_flag}double *{func_prefix}_grid(double *out)\n"
             f"{{\n"
             f"    const {nn_base.struct_type_name} *w = &SRGRZ_WEIGHTS;\n"
@@ -421,7 +426,9 @@ def generate_c_code(
             f"    }}\n"
             f"    return out;\n"
             f"}}\n\n"
-            
+        )
+
+        interp_fn = (
             f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out)\n"
             f"{{\n"
             f"    const {nn_base.struct_type_name} *w = &SRGRZ_WEIGHTS;\n"
@@ -440,7 +447,9 @@ def generate_c_code(
             f"        out[i] = vcut[lo] + t * (vcut[hi] - vcut[lo]);\n"
             f"    }}\n"
             f"}}\n\n"
-            
+        )
+
+        srgrz_project_fn = (
             f"{cu_flag} int {func_prefix}_project(double alpha, double gamma, double phi, double *alpha_proj, double *gamma_proj, double *phi_proj)\n"
             f"{{\n"
             f"    /* If already converged, return original point unchanged (matches Python). */\n"
@@ -458,14 +467,18 @@ def generate_c_code(
             f"    *phi_proj = xp[2];\n"
             f"    return converged;\n"
             f"}}\n\n"
+        )
 
+        eval_norm_fn = (
             f"{cu_flag}void {func_prefix}_eval_norm(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out)\n"
             f"{{\n"
             f"    double vcut[SRGRZ_N_MU];\n"
             f"    {func_prefix}_predict(alpha, gamma, phi, vcut);\n"
             f"    {func_prefix}_interp(vcut, mu_new, n, mu_ref, out);\n"
             f"}}\n\n"
+        )
 
+        proj_eval_norm_fn = (
             f"{cu_flag}void {func_prefix}_proj_eval_norm(const double *mu_new, int n, double mu_ref,\n"
             f"    double alpha, double gamma, double phi, double *out)\n"
             f"{{\n"
@@ -473,7 +486,9 @@ def generate_c_code(
             f"    {func_prefix}_project(alpha, gamma, phi, &xp[0], &xp[1], &xp[2]);\n"
             f"    {func_prefix}_eval_norm(mu_new, n, mu_ref, xp[0], xp[1], xp[2], out);\n"
             f"}}\n\n"
+        )
 
+        eval_fn = (
             f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double phi, double phi_wall, double density,\n"
             f"    double temperature, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
@@ -488,7 +503,9 @@ def generate_c_code(
             f"        out[i] = 1.0;\n"
             f"    }}\n"
             f"}}\n"
-        
+        )
+
+        eval_fact_fn = (
             f"{cu_flag}void {func_prefix}_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
@@ -496,13 +513,13 @@ def generate_c_code(
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
-            
             f"    {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
-            
             f"    for (int i = 0; i < n; i++)\n"
             f"      out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"}}\n"
-            
+        )
+
+        conv_eval_fact_fn = (
             f"{cu_flag}void {func_prefix}_conv_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
@@ -512,7 +529,6 @@ def generate_c_code(
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
             f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
             f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
-            
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
@@ -520,7 +536,9 @@ def generate_c_code(
             f"        out[i] = 1.0;\n"
             f"    }}\n"
             f"}}\n"
-            
+        )
+
+        proj_eval_fact_fn = (
             f"{cu_flag}void {func_prefix}_proj_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
             f"{{\n"
@@ -536,16 +554,34 @@ def generate_c_code(
             f"        gamma = xp[1];\n"
             f"        phinorm = xp[2];\n"
             f"      }}\n"
-            
             f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
-                        
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = 1.0;\n"
             f"    }}\n"
-            f"}}\n"        
+            f"}}\n"
+        )
+
+        # ── Assemble .c ───────────────────────────────────────────────────────────
+        c_source = (
+            c_file_header
+            + struct_instances
+            + predict_fn
+            + cu_flag + svm_c_code + "\n"
+            + converged_fn
+            + svm_grad_fn
+            + project_internal_fn
+            + grid_fn
+            + interp_fn
+            + srgrz_project_fn
+            + eval_norm_fn
+            + proj_eval_norm_fn
+            + eval_fn
+            + eval_fact_fn
+            + conv_eval_fact_fn
+            + proj_eval_fact_fn
         )
 
         # ── Assemble .h ───────────────────────────────────────────────────────────               

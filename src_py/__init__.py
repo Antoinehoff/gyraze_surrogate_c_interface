@@ -12,6 +12,8 @@ from .gyraze_surrogate_proj import surrogate_model as surrogate_model_proj
 from .gyraze_full_surrogate import surrogate_model as surrogate_full_model
 # Surrogate like above but using the MPE data.
 from .gyraze_full_MPE_surrogate import surrogate_model as surrogate_full_MPE_model
+# Surrogate trained on the MPE data but only converged GYRAZE
+from .gyraze_conv_MPE_surrogate import surrogate_model as surrogate_conv_MPE_model
 # SVM classifier for convergence prediction
 from .gyraze_surrogate_proj import svm_predict
 # C code export function
@@ -24,6 +26,7 @@ __all__ = [
     "surrogate_model_proj",
     "surrogate_full_model",
     "surrogate_full_MPE_model",
+    "surrogate_conv_MPE_model",
     "svm_predict",
     "muvec",
     "generate_c_code",
