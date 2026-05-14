@@ -116,6 +116,10 @@ def generate_c_code(
     normalization_total: str = None,
     nn_total_model: str = None,
     gkeyll_dir: str    = None,
+    # Sets of function names to omit from each target's output.
+    # Valid names: 'proj_eval_norm', 'eval', 'conv_eval_fact', 'proj_eval_fact'
+    test_exclude: set  = None,
+    gkyl_exclude: set  = None,
 ):
     """
     Export the GYRAZE surrogate to C.
@@ -132,6 +136,9 @@ def generate_c_code(
     nn_total_model : (optional) path to the PyTorch weights file for the "total surrogate" variant (.pth)
     gkeyll_dir    : directory for the Gkeyll kernel files (default: same as output_dir)
                     produces gk_gyraze_surrogate.c and gkyl_gk_gyraze_surrogate.h
+    test_exclude  : set of function names to omit from the test target output.
+                    Valid names: 'proj_eval_norm', 'eval', 'conv_eval_fact', 'proj_eval_fact'
+    gkyl_exclude  : same, for the gkyl target.
     """
     # ── Mu-grid ───────────────────────────────────────────────────────────────
     try:
@@ -282,7 +289,7 @@ def generate_c_code(
             f" */\n"
             f'#include "{h_fname}"\n'
             f"#include <math.h>\n\n"
-            f"#define {cons_prefix}_PHI_THRESHOLD 2.0\n\n"
+            f"#define SRG_PHI_THRESHOLD 0.01\n\n"
         )
 
         converged_fn = (
@@ -484,8 +491,26 @@ def generate_c_code(
             f"{{\n"
             f"    double xp[3];\n"
             f"    {func_prefix}_project(alpha, gamma, phi, &xp[0], &xp[1], &xp[2]);\n"
-            f"    {func_prefix}_eval_norm(mu_new, n, mu_ref, xp[0], xp[1], xp[2], out);\n"
+            f"    double vcut[SRGRZ_N_MU];\n"
+            f"    {func_prefix}_predict(xp[0], xp[1], xp[2], vcut);\n"
+            f"    {func_prefix}_interp(vcut, mu_new, n, mu_ref, out);\n"
             f"}}\n\n"
+        )
+        
+        eval_fact_fn = (
+            f"{cu_flag}void {func_prefix}_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
+            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
+            f"{{\n"
+            f"    double muref = temperature / bmag;\n"
+            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
+            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
+            f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
+            f"    double vcut[SRGRZ_N_MU];\n"
+            f"    {func_prefix}_predict(alpha, gamma, phinorm, vcut);\n"
+            f"    {func_prefix}_interp(vcut, mu_new, n, muref, out);\n"
+            f"    for (int i = 0; i < n; i++)\n"
+            f"      out[i] = fmax(0.0, pow(out[i],2) / (2*phinorm));\n"
+            f"}}\n"
         )
 
         eval_fn = (
@@ -496,8 +521,10 @@ def generate_c_code(
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
-            f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD) {{\n"
-            f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n"
+            f"    if (phinorm > SRG_PHI_THRESHOLD) {{\n"
+            f"      double vcut[SRGRZ_N_MU];\n"
+            f"      {func_prefix}_predict(alpha, gamma, phinorm, vcut);\n"
+            f"      {func_prefix}_interp(vcut, mu_new, n, muref, out);\n"
             f"    }} else {{\n"
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = 1.0;\n"
@@ -505,19 +532,6 @@ def generate_c_code(
             f"}}\n"
         )
 
-        eval_fact_fn = (
-            f"{cu_flag}void {func_prefix}_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
-            f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out)\n"
-            f"{{\n"
-            f"    double muref = temperature / bmag;\n"
-            f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
-            f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
-            f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
-            f"    {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
-            f"    for (int i = 0; i < n; i++)\n"
-            f"      out[i] = pow(out[i],2) / (2*phinorm);\n"
-            f"}}\n"
-        )
 
         conv_eval_fact_fn = (
             f"{cu_flag}void {func_prefix}_conv_eval_fact(const double *mu_new,  int n, double phi, double phi_wall,\n"
@@ -527,8 +541,10 @@ def generate_c_code(
             f"    double gamma   = (1.0 / bmag) * sqrt({cons_prefix}_ELECTRON_MASS * density / {cons_prefix}_EPSILON0);\n"
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n\n"
-            f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
-            f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            f"    if (phinorm > SRG_PHI_THRESHOLD && {func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
+            f"      double vcut[SRGRZ_N_MU];\n"
+            f"      {func_prefix}_predict(alpha, gamma, phinorm, vcut);\n"
+            f"      {func_prefix}_interp(vcut, mu_new, n, muref, out);\n\n"
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
@@ -546,7 +562,7 @@ def generate_c_code(
             f"    double phinorm = ({cons_prefix}_ELEMENTARY_CHARGE * (phi - phi_wall)) / temperature;\n"
             f"    double alpha = impact_angle * 180/{cons_prefix}_PI;\n"
             f"    double muref = temperature / bmag;\n\n"
-            f"    if (phinorm > {cons_prefix}_PHI_THRESHOLD) {{\n"
+            f"    if (phinorm > SRG_PHI_THRESHOLD) {{\n"
             f"      if (!{func_prefix}_converged(alpha, gamma, phinorm)) {{\n"
             f"        double xp[3];\n"
             f"        {func_prefix}_project(alpha, gamma, phinorm, &xp[0], &xp[1], &xp[2]);\n"
@@ -554,7 +570,9 @@ def generate_c_code(
             f"        gamma = xp[1];\n"
             f"        phinorm = xp[2];\n"
             f"      }}\n"
-            f"      {func_prefix}_eval_norm(mu_new, n, muref, alpha, gamma, phinorm, out);\n\n"
+            f"      double vcut[SRGRZ_N_MU];\n"
+            f"      {func_prefix}_predict(alpha, gamma, phinorm, vcut);\n"
+            f"      {func_prefix}_interp(vcut, mu_new, n, muref, out);\n\n"
             f"      for (int i = 0; i < n; i++)\n"
             f"        out[i] = pow(out[i],2) / (2*phinorm);\n"
             f"    }} else {{\n"
@@ -565,6 +583,7 @@ def generate_c_code(
         )
 
         # ── Assemble .c ───────────────────────────────────────────────────────────
+        _exc = (gkyl_exclude or set()) if code_gen == "gkyl" else (test_exclude or set())
         c_source = (
             c_file_header
             + struct_instances
@@ -576,30 +595,29 @@ def generate_c_code(
             + grid_fn
             + interp_fn
             + srgrz_project_fn
-            + eval_norm_fn
-            + proj_eval_norm_fn
-            + eval_fn
-            + eval_fact_fn
-            + conv_eval_fact_fn
-            + proj_eval_fact_fn
+            + ("" if "eval_norm"       in _exc else eval_norm_fn)
+            + ("" if "eval_fact"       in _exc else eval_fact_fn)
+            + ("" if "proj_eval_norm" in _exc else proj_eval_norm_fn)
+            + ("" if "eval"           in _exc else eval_fn)
+            + ("" if "conv_eval_fact" in _exc else conv_eval_fact_fn)
+            + ("" if "proj_eval_fact" in _exc else proj_eval_fact_fn)
         )
 
-        # ── Assemble .h ───────────────────────────────────────────────────────────               
-        h_source = (
+        # ── Assemble .h ───────────────────────────────────────────────────────────
+        h_file_header = (
             f"/*\n"
             f" * {h_fname}  -  GYRAZE surrogate model public API generated from {REPO_INFO}\n"
             f" * Sources:\n"
             + _sources_comment +
             f" */\n"
-            
             f"{header_head}"
-            
             f"/* Number of points in the fixed mu-grid. */\n"
             f"#define SRGRZ_N_MU {n_mu}\n\n"
-
             f"{struct_def}"
             f"{extern_c_beg}"
-            
+        )
+
+        converged_decl = (
             f"/**\n"
             f" * Returns 1 if GYRAZE is predicted to converge, 0 otherwise.\n"
             f" *\n"
@@ -608,23 +626,29 @@ def generate_c_code(
             f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
             f" */\n"
             f"{cu_flag}int {func_prefix}_converged(double alpha, double gamma, double phi);\n\n"
-            
+        )
+
+        predict_decl = (
             f"/**\n"
             f" * Runs the NN regression; writes SRGRZ_N_MU predicted v_par_cut values into out[].\n"
             f" *\n"
             f" * @param alpha: impact angle in degrees\n"
             f" * @param gamma: normalised plasma density parameter\n"
             f" * @param phi:   normalised sheath potential drop (e * (phi - phi_wall) / T_e)\n"
-            f" */\n"            
+            f" */\n"
             f"{cu_flag}void {func_prefix}_predict(double alpha, double gamma, double phi, double out[SRGRZ_N_MU]);\n\n"
-            
+        )
+
+        grid_decl = (
             f"/**\n"
             f" * Copies the SRGRZ_N_MU-element mu-grid into out[] and returns out.\n"
             f" *\n"
             f" * @param out: output array of size SRGRZ_N_MU\n"
-            f" */\n"            
+            f" */\n"
             f"{cu_flag}double *{func_prefix}_grid(double *out);\n\n"
-            
+        )
+
+        interp_decl = (
             f"/**\n"
             f" * Linear interpolation of vcut[SRGRZ_N_MU] (on the fixed mu-grid) onto\n"
             f" * mu_new[n]; results are written into out[n]. Clamps at the grid boundaries.\n"
@@ -636,7 +660,9 @@ def generate_c_code(
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
             f"{cu_flag}void {func_prefix}_interp(const double *vcut, const double *mu_new, int n, double mu_ref, double *out);\n\n"
-            
+        )
+
+        project_decl = (
             f"/**\n"
             f" * Projects (alpha, gamma, phi) onto the nearest convergent point in parameter space.\n"
             f" * The projection minimises svm_score(x)^2 + 1e-3*||x-x0||^2 via gradient descent\n"
@@ -652,7 +678,9 @@ def generate_c_code(
             f" */\n"
             f"{cu_flag}int {func_prefix}_project(double alpha, double gamma, double phi,\n"
             f"                             double *alpha_proj, double *gamma_proj, double *phi_proj);\n\n"
-            
+        )
+
+        eval_norm_decl = (
             f"/**\n"
             f" * Returns the prediction of a custom mu grid of size n taking normalized input.\n"
             f" *\n"
@@ -665,7 +693,9 @@ def generate_c_code(
             f" * @param out:     output array of size n where interpolated values are written\n"
             f" */\n"
             f"{cu_flag}void {func_prefix}_eval_norm(const double *mu_new, int n, double mu_ref, double alpha, double gamma, double phi, double *out);\n\n"
+        )
 
+        proj_eval_norm_decl = (
             f"/**\n"
             f" * Like {func_prefix}_eval_norm, but projects (alpha, gamma, phi) onto the nearest\n"
             f" * convergent point in parameter space when GYRAZE is predicted not to converge.\n"
@@ -682,7 +712,9 @@ def generate_c_code(
             f" */\n"
             f"{cu_flag}void {func_prefix}_proj_eval_norm(const double *mu_new, int n, double mu_ref,\n"
             f"    double alpha, double gamma, double phi, double *out);\n\n"
+        )
 
+        eval_decl = (
             f"/**\n"
             f" * Same as {func_prefix}_eval_norm, but uses physical parameters and evaluates on a custom mu grid.\n"
             f" * Conversion formulas:\n"
@@ -701,7 +733,9 @@ def generate_c_code(
             f" */\n"
             f"{cu_flag}void {func_prefix}_eval(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double bmag, double impact_angle, double *out);\n\n"
-            
+        )
+
+        eval_fact_decl = (
             f"/**\n"
             f" * Same as {func_prefix}_eval, but normalises output by sqrt(2 * e * (phi - phi_wall) / mass)\n"
             f" *\n"
@@ -717,9 +751,11 @@ def generate_c_code(
             f" */\n"
             f"{cu_flag}void {func_prefix}_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
-            
+        )
+
+        conv_eval_fact_decl = (
             f"/**\n"
-            f" * Same as {func_prefix}_eval, but normalises return 0 if gyraze is not converging.\n"
+            f" * Same as {func_prefix}_eval, but returns 0 if gyraze is not converging.\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
@@ -733,9 +769,11 @@ def generate_c_code(
             f" */\n"
             f"{cu_flag}void {func_prefix}_conv_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
-            
+        )
+
+        proj_eval_fact_decl = (
             f"/**\n"
-            f" * Same as {func_prefix}_eval_fact, but normalises return 0 if gyraze is not converging.\n"
+            f" * Same as {func_prefix}_eval_fact, but projects onto nearest convergent point if not converging.\n"
             f" *\n"
             f" * @param mu_new:  input array of size n containing the new mu points\n"
             f" * @param n:       number of points in mu_new and out\n"
@@ -749,7 +787,22 @@ def generate_c_code(
             f" */\n"
             f"{cu_flag}void {func_prefix}_proj_eval_fact(const double *mu_new, int n, double phi, double phi_wall,\n"
             f"    double density, double temperature, double q2Dm, double bmag, double impact_angle, double *out);\n\n"
-            f"{header_tail}"
+        )
+
+        h_source = (
+            h_file_header
+            + converged_decl
+            + predict_decl
+            + grid_decl
+            + interp_decl
+            + project_decl
+            + ("" if "eval_norm"       in _exc else eval_norm_decl)
+            + ("" if "eval_fact"       in _exc else eval_fact_decl)
+            + ("" if "proj_eval_norm" in _exc else proj_eval_norm_decl)
+            + ("" if "eval"           in _exc else eval_decl)
+            + ("" if "conv_eval_fact" in _exc else conv_eval_fact_decl)
+            + ("" if "proj_eval_fact" in _exc else proj_eval_fact_decl)
+            + header_tail
         )
         os.makedirs(outdir, exist_ok=True)
         c_path = os.path.join(outdir, c_fname)
