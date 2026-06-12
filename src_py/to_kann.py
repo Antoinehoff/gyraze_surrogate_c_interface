@@ -530,6 +530,16 @@ def main(argv=None):
         verify_kann_numpy(args.model, out_path, x_input,
                           activation=args.activation, norm_path=args.norm)
 
+def generate(model_path, output_path, norm_path, activation="silu", verify=True):
+    write_kann(model_path, output_path, activation=activation, norm_path=norm_path)
+    if verify:
+        print("Verifying…")
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+        layer_sizes = _infer_layer_sizes(state_dict)
+        rng = np.random.default_rng(42)
+        x_input = rng.standard_normal(layer_sizes[0]).astype(np.float32)
+        verify_kann_numpy(model_path, output_path, x_input,
+                          activation=activation, norm_path=norm_path)
 
 if __name__ == "__main__":
     main()
