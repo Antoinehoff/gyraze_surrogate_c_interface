@@ -1,0 +1,99 @@
+\documentclass[aps,prl,reprint]{revtex4-2}
+
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+
+\begin{document}
+% Paste after the existing Appendix A and before the bibliography.
+% The manuscript already enters appendix mode; do not add another \appendix.
+% Requires only amsmath, already used in the manuscript.
+
+\section{Surrogate data generation, training, and testing}
+\label{app:surrogate_training}
+
+This appendix describes the dataset and fitting procedures for the neural
+network (NN) predicting the electron cutting-velocity profile and the support
+vector machine (SVM) classifying GYRAZE convergence. The physical model and
+the coupling to Gkeyll are described in the main text.
+
+\subsection{Sampling and data preprocessing}
+
+A total of 3318 GYRAZE runs were attempted with uniformly sampled inputs
+$\mathbf{x}=(\alpha,\gamma,\Phi)$, where
+$\gamma=\rho_e/\lambda_d$ and
+$\Phi=e(\phi_{\mathrm{mpe}}-\phi_w)/T_e$. The sampling domain was
+\begin{equation}
+  \alpha\in[0^\circ,10^\circ],\qquad
+  \gamma\in[0,9],\qquad
+  \Phi\in[0,10].
+\end{equation}
+The runs were distributed across 16 CPU cores. Of these runs, 1566 converged
+and supplied input/cutting-velocity profile pairs $(\mathbf{x}, v_{\parallel \text{cut}}(\mu_{\text{grid}}))\in \mathbb{R}^3 \times \mathbb{R}^{20}$ for NN regression. This provided the following approximate range of NN training data, with sampling distribution determined by the convergence behavior of GYRAZE
+\begin{equation}
+  \alpha\in[2^\circ,10^\circ],\qquad
+  \gamma\in[0.5,4],\qquad
+  \Phi\in[1,10].
+\end{equation}
+
+All 3318 runs
+supplied convergence labels ('yes','no') for SVM classification. These labels describe
+the numerical convergence of GYRAZE under the specified solver settings;
+nonconvergence does not establish the absence of a physical sheath solution. Native GYRAZE convergence tolerances were used: $<0.1\%$ MP mean residual, $<1\%$ DS mean residual, and $<0.5\%$ relative current error. A maximum of 1000 iterations was used for each phase, with a timeout of 3 minutes per sample.
+
+For each learning task, the relevant dataset was randomly partitioned into
+training, validation, and test subsets in an approximate 60:20:20 ratio. The input data was normalized by the mean and sample variance of the training dataset.
+Training subsets were used for parameter fitting, validation subsets for
+hyperparameter selection, and test subsets for final performance evaluation.
+\subsection{Neural-network architecture and training}
+
+The NN maps the three input parameters to the dimensionless
+cutting-velocity profile $v_{\mathrm{NN}}(\mathbf{x};\mu)$ used in the main
+text. Only converged GYRAZE runs were used to fit and evaluate this mapping.
+The selected model was a fully connected feedforward network with SiLU
+hidden activations and a linear output layer. The input dimension is 3, there are 3 hidden layers in the network of width 75, and the output dimension is 20 (corresponding to the native discretization $\mu_\text{grid}$ in GYRAZE):
+\[
+3 \rightarrow{75}\rightarrow{75}\rightarrow{75}\rightarrow{20}
+\]
+
+Network parameters were fitted using the Adam optimizer with a
+mean-squared-error loss on mini-batches. Activation function, depth, and
+hidden-layer width were varied coarsely, and the configuration with the lowest
+validation loss was selected. A learning rate $\eta = 1\times 10^{-5}$, batch size $32$, and 500 epochs were used in training.
+
+On the held-out converged runs, the selected NN achieved
+$R^2=0.9991$ and a test MSE of $8.34\times10^{-4}$.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{ConvNNprof.png}
+\caption{Predictive performance of the Convergent NN Surrogate on the testing dataset.}
+\label{fig:conv_nn_prof}
+\end{figure}
+
+\subsection{SVM convergence classification}
+
+A soft-margin SVM with a radial-basis-function kernel was trained on the convergence
+labels of all attempted runs, using the training/validation/test procedure
+described above. The selected hyperparameters were $C=0.1$ and kernel
+coefficient $\kappa=3.16$, where
+\begin{equation}
+ K(\mathbf{z},\mathbf{z}')=
+ \exp\!\left[-\kappa\|\mathbf{z}-\mathbf{z}'\|_2^2\right],
+\end{equation}
+and $\mathbf{z}$ denotes the input representation supplied to the
+classifier. Hyperparameters were selected
+by validation accuracy. The selected classifier achieved a held-out test
+accuracy of $96.62\%$.
+\begin{figure*}[h]
+\centering
+\includegraphics[width=16cm]{svm_boundary_split.png}
+\caption{Predictive performance of the SVM on the full dataset. Precision is high compared to recall, which suits our application; the convergence region should admit few nonconverged runs, characterizing parameters with consistent convergence in GYRAZE. Points inside the decision boundary (left) and points outside the decision boundary (right).}
+\label{fig:conv_nn_prof}
+\end{figure*}
+
+\subsection{Use outside the GYRAZE convergence region}
+
+[to be discussed]
+
+
+\end{document}
